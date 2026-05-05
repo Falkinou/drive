@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 // CONFIG
 // ============================================================
 const SB="https://cicndnlxwjitxroqtbnr.supabase.co";
-const APP_VERSION="10.18.0";
+const APP_VERSION="10.18.1";
 const APP_BUILD="2026-04-17";
 const SK="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNpY25kbmx4d2ppdHhyb3F0Ym5yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQxMDMzNjcsImV4cCI6MjA4OTY3OTM2N30.x-hxZBMPGzpDSWmbekQAxMQ6BD3R1EUzkB1noHBlEoQ";
 const H={"apikey":SK,"Authorization":`Bearer ${SK}`,"Content-Type":"application/json"};
@@ -5311,33 +5311,75 @@ function DriveBacteriaArena({session,mode,aiLevel,auth,onQuit,onBack,flash}){
 
   const playSound=(s)=>{if(soundsOn&&bactSounds[s])bactSounds[s]();};
 
-  // ==== MULTI: Realtime sync ====
+  // ==== MULTI: Realtime sync via DB polling (works without supabase-js) ====
+  const pollIntervalRef=useRef(null);
   useEffect(()=>{
     if(mode!=="coop"||!session||session.solo)return;
-    if(!window.supabase)return;
-    const chan=window.supabase.channel(`bact:${session.id}`,{config:{broadcast:{self:false}}});
-    chan.on("broadcast",{event:"move"},({payload})=>{
-      if(payload.player===auth.code)return;
-      if(payload.moveCount<=lastSyncedMoveRef.current)return;
-      lastSyncedMoveRef.current=payload.moveCount;
-      animateMove(payload.fromR,payload.fromC,payload.toR,payload.toC,JSON.parse(payload.board),payload.turn,payload.moveCount);
-    });
-    chan.subscribe();
-    channelRef.current=chan;
-    return()=>{try{chan.unsubscribe();}catch(e){}channelRef.current=null;};
+    let cancelled=false;
+    // Try realtime broadcast first if supabase JS client exists
+    if(window.supabase){
+      try{
+        const chan=window.supabase.channel(`bact:${session.id}`,{config:{broadcast:{self:false}}});
+        chan.on("broadcast",{event:"move"},({payload})=>{
+          if(payload.player===auth.code)return;
+          if(payload.moveCount<=lastSyncedMoveRef.current)return;
+          lastSyncedMoveRef.current=payload.moveCount;
+          if(payload.skipped){
+            setBoard(JSON.parse(payload.board));
+            setTurn(payload.turn);
+            setMoveCount(payload.moveCount);
+          }else{
+            animateMove(payload.fromR,payload.fromC,payload.toR,payload.toC,JSON.parse(payload.board),payload.turn,payload.moveCount);
+          }
+        });
+        chan.subscribe();
+        channelRef.current=chan;
+      }catch(e){console.warn("Realtime fail, fallback to polling",e);}
+    }
+    // Always also run DB polling as primary (most reliable for turn-based)
+    const poll=async()=>{
+      if(cancelled)return;
+      try{
+        const[s]=await dbGet("bacteria_sessions",`id=eq.${session.id}&limit=1`);
+        if(!s||cancelled)return;
+        if(s.status==="ended"){
+          flash("Partie terminée par l'adversaire");
+          setTimeout(onQuit,1500);
+          return;
+        }
+        const dbMoveCount=s.move_count||0;
+        if(dbMoveCount>lastSyncedMoveRef.current){
+          // Opponent played — refresh state
+          const newBoard=typeof s.board==="string"?JSON.parse(s.board):s.board;
+          // Update without animation if we missed multiple moves; otherwise animate
+          lastSyncedMoveRef.current=dbMoveCount;
+          setBoard(newBoard);
+          setTurn(s.turn||1);
+          setMoveCount(dbMoveCount);
+          if(bactGameOver(newBoard))setTimeout(()=>checkEnd(newBoard),300);
+        }
+      }catch(e){}
+    };
+    pollIntervalRef.current=setInterval(poll,1500);
+    return()=>{
+      cancelled=true;
+      if(pollIntervalRef.current){clearInterval(pollIntervalRef.current);pollIntervalRef.current=null;}
+      try{if(channelRef.current)channelRef.current.unsubscribe();}catch(e){}
+      channelRef.current=null;
+    };
   // eslint-disable-next-line
   },[mode,session?.id,auth.code]);
 
-  const broadcastMove=(fromR,fromC,toR,toC,newBoard,newTurn,newMoveCount)=>{
-    if(!channelRef.current)return;
-    try{
-      channelRef.current.send({type:"broadcast",event:"move",payload:{
-        player:auth.code,fromR,fromC,toR,toC,
+  const broadcastMove=(fromR,fromC,toR,toC,newBoard,newTurn,newMoveCount,skipped=false)=>{
+    // Persist to DB (primary sync)
+    dbPatch("bacteria_sessions",{board:JSON.stringify(newBoard),turn:newTurn,move_count:newMoveCount},`id=eq.${session.id}`).catch(()=>{});
+    // Also broadcast for instant feedback if available
+    if(channelRef.current){
+      try{channelRef.current.send({type:"broadcast",event:"move",payload:{
+        player:auth.code,fromR,fromC,toR,toC,skipped,
         board:JSON.stringify(newBoard),turn:newTurn,moveCount:newMoveCount,
-      }});
-      // also persist to DB
-      dbPatch("bacteria_sessions",{board:JSON.stringify(newBoard),turn:newTurn,move_count:newMoveCount},`id=eq.${session.id}`).catch(()=>{});
-    }catch(e){}
+      }});}catch(e){}
+    }
   };
 
   const animateMove=(fromR,fromC,toR,toC,finalBoard,newTurn,newMoveCount)=>{
@@ -5468,7 +5510,7 @@ function DriveBacteriaArena({session,mode,aiLevel,auth,onQuit,onBack,flash}){
         setTimeout(()=>{
           const newTurn=turn===1?2:1;
           setTurn(newTurn);
-          if(mode==="coop")broadcastMove(-1,-1,-1,-1,board,newTurn,moveCount+1);
+          if(mode==="coop")broadcastMove(-1,-1,-1,-1,board,newTurn,moveCount+1,true);
         },800);
       }
     }
@@ -5512,6 +5554,16 @@ function DriveBacteriaArena({session,mode,aiLevel,auth,onQuit,onBack,flash}){
         isMyTurn?"À toi de jouer":
         `Tour de ${oppName}`}
     </div>
+
+    {/* Legend (visible when a bacteria is selected) */}
+    {selected&&!gameEnd&&<div style={{flexShrink:0,display:"flex",justifyContent:"center",gap:14,padding:"2px 0 6px",fontSize:9,color:"rgba(255,255,255,.7)",fontWeight:700,position:"relative",zIndex:5}}>
+      <span style={{display:"flex",alignItems:"center",gap:4}}>
+        <span style={{display:"inline-block",width:14,height:14,borderRadius:7,background:`${myColor}33`,border:`2px solid ${myColor}`}}/> Duplique
+      </span>
+      <span style={{display:"flex",alignItems:"center",gap:4}}>
+        <span style={{display:"inline-block",width:14,height:14,borderRadius:7,background:"transparent",border:`2px dashed ${myColor}AA`}}/> Téléporte
+      </span>
+    </div>}
 
     {/* Board */}
     <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",padding:10,position:"relative",zIndex:5}}>
@@ -5565,7 +5617,31 @@ function DriveBacteriaArena({session,mode,aiLevel,auth,onQuit,onBack,flash}){
 
             return<g key={`${r}-${c}`} onClick={()=>handleCellClick(r,c)} style={{cursor:gameEnd?"default":(v===myPlayer&&isMyTurn)||(v===0&&selected)?"pointer":"default"}}>
               {/* cell base */}
-              <ellipse cx={x+30} cy={y+30} rx="26" ry="20" fill={v===-1?"url(#bact-obstacle)":(isDup?"url(#bact-cell-reach-dup)":(isJump?"url(#bact-cell-reach-jump)":"url(#bact-cell-empty)"))} stroke={v===-1?"#000":(isDup||isJump?myColor+"99":"rgba(255,255,255,.1)")} strokeWidth={isDup||isJump?2:1}/>
+              <ellipse cx={x+30} cy={y+30} rx="26" ry="20"
+                fill={v===-1?"url(#bact-obstacle)":(isDup?"url(#bact-cell-reach-dup)":"url(#bact-cell-empty)")}
+                stroke={v===-1?"#000":isDup?myColor:isJump?myColor+"AA":"rgba(255,255,255,.1)"}
+                strokeWidth={isDup?2.5:isJump?2:1}
+                strokeDasharray={isJump?"4 3":""}
+              >
+                {isDup&&<animate attributeName="stroke-opacity" values="1;.4;1" dur="1.4s" repeatCount="indefinite"/>}
+              </ellipse>
+
+              {/* DUPLICATION preview: small bacteria ghost in the cell */}
+              {isDup&&<g transform={`translate(${x+30},${y+30})`} opacity=".55" style={{pointerEvents:"none"}}>
+                <path d={`M 0,-13 C 11,-13 13,-3 13,2 C 13,9 7,13 0,13 C -7,13 -13,9 -13,2 C -13,-3 -11,-13 0,-13 Z`}
+                  fill={myPlayer===1?"url(#bact-green)":"url(#bact-purple)"}/>
+                <text x="0" y="3" textAnchor="middle" fontSize="14" fontWeight="900" fill="#fff" stroke="#000" strokeWidth=".4" style={{filter:"drop-shadow(0 1px 1px rgba(0,0,0,.5))"}}>+</text>
+                <animate attributeName="opacity" values=".4;.7;.4" dur="1.4s" repeatCount="indefinite"/>
+              </g>}
+
+              {/* JUMP/TELEPORT indicator: empty dashed circle + arrow icon */}
+              {isJump&&<g transform={`translate(${x+30},${y+30})`} opacity=".75" style={{pointerEvents:"none"}}>
+                <circle r="10" fill="none" stroke={myColor} strokeWidth="1.5" strokeDasharray="2 2" opacity=".7"/>
+                {/* teleport arrow ↯ */}
+                <path d="M -4,-5 L 2,-2 L -1,0 L 4,5 L -2,2 L 1,0 Z" fill={myColor} opacity=".9"/>
+                <animate attributeName="opacity" values=".5;.85;.5" dur="1.6s" repeatCount="indefinite"/>
+              </g>}
+
               {/* obstacle hole shadow */}
               {v===-1&&<>
                 <ellipse cx={x+30} cy={y+34} rx="22" ry="13" fill="#000" opacity=".7"/>
