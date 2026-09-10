@@ -265,6 +265,9 @@ create table if not exists bacteria_sessions (
   board text not null,
   turn integer not null default 1,
   move_count integer not null default 0,
+  winner integer,
+  ended_at timestamptz,
+  last_move jsonb,
   created_at timestamptz not null default now()
 );
 
@@ -298,6 +301,7 @@ create index if not exists anfr_position_idx on anfr_data(lat, lng);
 create index if not exists game_sessions_code_status_idx on game_sessions(code, status);
 create index if not exists td_sessions_code_status_idx on td_sessions(code, status);
 create index if not exists bacteria_sessions_code_status_idx on bacteria_sessions(code, status);
+create unique index if not exists bacteria_active_code_unique on bacteria_sessions(code) where status in ('waiting', 'playing');
 
 create or replace function set_updated_at()
 returns trigger language plpgsql as $$

@@ -6,6 +6,7 @@ import { registerDataRoutes } from "./data.js";
 import { registerUploadRoutes } from "./uploads.js";
 import { registerAdminRoutes } from "./admin.js";
 import { registerFuelRoutes } from "./fuel.js";
+import { registerBacteriaRoutes } from "./bacteria.js";
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -44,6 +45,7 @@ registerDataRoutes(app);
 registerUploadRoutes(app);
 registerAdminRoutes(app);
 registerFuelRoutes(app);
+registerBacteriaRoutes(app);
 
 app.use((req, res) => res.status(404).json({ error: "Route introuvable" }));
 

@@ -23,7 +23,7 @@ const TABLE_ACCESS = {
   game_players: { read: "tech", write: "tech" },
   td_sessions: { read: "tech", write: "tech" },
   td_players: { read: "tech", write: "tech" },
-  bacteria_sessions: { read: "tech", write: "tech" },
+  bacteria_sessions: { read: "tech", write: null },
 };
 
 const ACTOR_COLUMNS = {
