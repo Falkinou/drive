@@ -5,7 +5,7 @@ import Bacteria from "./Bacteria";
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION="10.19.0";
+const APP_VERSION="10.19.1";
 const APP_BUILD="2026-09-10";
 const API="/api";
 

@@ -1,4 +1,4 @@
-const CACHE_NAME = "drive-shell-v10.19.0";
+const CACHE_NAME = "drive-shell-v10.19.1";
 const APP_SHELL = ["/", "/manifest.json", "/icon-192.png", "/icon-512.png"];
 
 self.addEventListener("install", event => {
