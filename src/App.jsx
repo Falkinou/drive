@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { ensureLeaflet } from "./leaflet";
 import Bacteria from "./Bacteria";
+import { ADMIN_SHELL_STYLE, AdminOverview, AdminTeam } from "./AdminDashboard";
 
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION="10.19.1";
+const APP_VERSION="10.20.0";
 const APP_BUILD="2026-09-10";
 const API="/api";
 
@@ -5396,253 +5397,49 @@ function AdminPanel({auth,onBack,logout}){
   const[logs,setLogs]=useState([]);
   const[activity,setActivity]=useState([]);
   const[loading,setLoading]=useState(true);
+  const[loadError,setLoadError]=useState("");
+  const[refreshedAt,setRefreshedAt]=useState(null);
+  const[adminToast,setAdminToast]=useState("");
+
+  const flash=message=>{setAdminToast(message);setTimeout(()=>setAdminToast(""),2600);};
 
   useEffect(()=>{loadAll();},[]);
 
   const loadAll=async()=>{
     setLoading(true);
-    try{
-      const[s,t,v,l,a]=await Promise.all([
-        dbGet("sites","select=id,name,type,lat,lng,address,code_nidt,needs_4x4,needs_binome,needs_terrasse,anfr_support_id,technologies&order=name.asc"),
-        dbGet("technicians","order=code.asc"),
-        dbGet("visits","order=visited_at.desc&limit=500"),
-        dbGet("login_logs","order=created_at.desc&limit=200"),
-        dbGet("activity_log","order=created_at.desc&limit=50"),
-      ]);
-      setSites(s);setTechs(t);setVisits(v);setLogs(l);setActivity(a);
-    }catch(e){}
+    setLoadError("");
+    const results=await Promise.allSettled([
+      dbGet("sites","select=id,name,type,lat,lng,address,code_nidt,needs_4x4,needs_binome,needs_terrasse,anfr_support_id,technologies&order=name.asc"),
+      dbGet("technicians","order=code.asc"),
+      dbGet("visits","order=visited_at.desc&limit=10000"),
+      dbGet("login_logs","order=created_at.desc&limit=500"),
+      dbGet("activity_log","order=created_at.desc&limit=100"),
+    ]);
+    const setters=[setSites,setTechs,setVisits,setLogs,setActivity];
+    results.forEach((result,index)=>{if(result.status==="fulfilled")setters[index](result.value||[]);});
+    if(results.some(result=>result.status==="rejected"))setLoadError("Certaines données n’ont pas pu être actualisées.");
+    setRefreshedAt(new Date());
     setLoading(false);
   };
 
-  const gpsCount=sites.filter(s=>s.lat&&s.lng&&!(s.lat===0&&s.lng===0)).length;
-  const anfrCount=sites.filter(s=>s.anfr_support_id).length;
-  const mobileSites=sites.filter(s=>s.type==="mobile");
-  const fixeSites=sites.filter(s=>s.type==="fixe");
-  const poiSites=sites.filter(s=>s.type==="poi");
-  const sites4x4=sites.filter(s=>s.needs_4x4).length;
-  const sitesTer=sites.filter(s=>s.needs_terrasse).length;
-  const sitesBin=sites.filter(s=>s.needs_binome).length;
-  const thisMonth=visits.filter(v=>{const d=new Date(v.visited_at);const n=new Date();return d.getMonth()===n.getMonth()&&d.getFullYear()===n.getFullYear();});
-
-  // Techno distribution
-  const techStats=useMemo(()=>{
-    const m={};
-    sites.forEach(s=>(s.technologies||[]).forEach(t=>{m[t]=(m[t]||0)+1;}));
-    return Object.entries(m).sort((a,b)=>b[1]-a[1]);
-  },[sites]);
-
-  // Sites without visit in 30 days
-  const staleCount=useMemo(()=>{
-    const cutoff=Date.now()-30*24*3600*1000;
-    const lastVisit={};
-    visits.forEach(v=>{const d=new Date(v.visited_at).getTime();if(!lastVisit[v.site_id]||d>lastVisit[v.site_id])lastVisit[v.site_id]=d;});
-    return mobileSites.filter(s=>!lastVisit[s.id]||lastVisit[s.id]<cutoff).length;
-  },[mobileSites,visits]);
-
-  // Visits per day (last 7 days)
-  const last7=useMemo(()=>{
-    const days=[];const now=new Date();
-    for(let i=6;i>=0;i--){const d=new Date(now);d.setDate(d.getDate()-i);days.push({date:d.toLocaleDateString("fr",{weekday:"short",day:"numeric"}),count:visits.filter(v=>{const vd=new Date(v.visited_at);return vd.toDateString()===d.toDateString();}).length});}
-    return days;
-  },[visits]);
-
-  // Top techs
-  const topTechs=useMemo(()=>{
-    const map={};thisMonth.forEach(v=>{map[v.technician_code]=(map[v.technician_code]||0)+1;});
-    return Object.entries(map).sort((a,b)=>b[1]-a[1]).slice(0,5);
-  },[thisMonth]);
-
-  const maxBar=Math.max(...last7.map(d=>d.count),1);
-
   if(loading)return<><TopBar t="Admin" onBack={onBack}/><div style={S.loadR}><div style={S.spin}/>Chargement...</div></>;
 
+  const adminTabs=[["dash","⌂","Vue d’ensemble"],["team","◉","Équipe"],["techs","♙","Comptes"],["sites","⌖","Sites"],["stats","↗","Statistiques"],["annonces","◌","Annonces"],["duplicates","◇","Doublons"],["logs","≡","Connexions"],["trash","⌫","Corbeille"],["health","♡","Santé"],["backup","↓","Sauvegardes"]];
+
   return<>
+    <style>{ADMIN_SHELL_STYLE}</style>
     <TopBar t="Admin" onBack={onBack}/>
-
-    {/* Tab bar */}
-    <div style={{display:"flex",background:"#fff",borderBottom:"1px solid #EEE",position:"sticky",top:48,zIndex:50}}>
-      {[["dash","Dashboard"],["annonces","Annonces"],["stats","Stats"],["team","Équipe"],["techs","Techniciens"],["sites","Sites"],["duplicates","Doublons"],["logs","Logs"],["trash","Corbeille"],["health","Santé"],["backup","Backup"]].map(([k,l])=>
-        <button key={k} onClick={()=>setTab(k)} style={{flex:1,padding:"10px 0",border:"none",background:"none",fontSize:12,fontWeight:700,color:tab===k?P:"#999",borderBottom:tab===k?`2px solid ${P}`:"2px solid transparent",cursor:"pointer"}}>{l}</button>
-      )}
-    </div>
-
-    <div style={{padding:"12px 14px 40px"}} className="drv-admin-pad">
+    <div className="admin-page">
+      <nav className="admin-tabs" aria-label="Sections administrateur">{adminTabs.map(([key,icon,label])=><button key={key} className={`admin-tab ${tab===key?"active":""}`} onClick={()=>setTab(key)}>{icon} {label}</button>)}</nav>
+      <main className="admin-content">
+      {loadError&&<div style={{background:"#FFF1EF",border:"1px solid #FFD4CE",color:"#A63B30",padding:"10px 12px",borderRadius:12,fontSize:10,fontWeight:700,marginBottom:10}}>{loadError} <button onClick={loadAll} style={{border:0,background:"none",color:"inherit",fontWeight:900,textDecoration:"underline",cursor:"pointer"}}>Réessayer</button></div>}
 
       {/* DASHBOARD */}
-      {tab==="dash"&&<>
-        {/* Stat cards */}
-        <div className="drv-admin-stats" style={{marginBottom:12}}>
-          {[[sites.length,"Sites total","#E8F8F5",P],[gpsCount,"GPS renseignés","#E3F2FD","#1565C0"],[thisMonth.length,"Visites ce mois","#FFF3E0","#E65100"],[techs.filter(t=>t.active!==false).length,"Techniciens actifs","#EDE7F6","#5E35B1"]].map(([val,label,bg,color],i)=>
-            <div key={i} style={{background:bg,borderRadius:12,padding:"14px 12px",textAlign:"center"}}>
-              <div style={{fontSize:28,fontWeight:800,color,animation:"countUp .5s ease",animationDelay:`${i*100}ms`,animationFillMode:"both"}}>{val}</div>
-              <div style={{fontSize:10,color,fontWeight:600,marginTop:2}}>{label}</div>
-            </div>
-          )}
-        </div>
-
-        {/* Second row of stat cards */}
-        <div className="drv-admin-stats" style={{marginBottom:12}}>
-          {[[anfrCount,"ANFR matchés","#F3E5F5","#7B1FA2"],[sites4x4,"Sites 4x4","#FBE9E7","#BF360C"],[sitesTer,"Terrasse","#E3F2FD","#1565C0"],[staleCount,"Sans visite 30j","#FFF3E0","#E65100"]].map(([val,label,bg,color],i)=>
-            <div key={i} style={{background:bg,borderRadius:12,padding:"14px 12px",textAlign:"center"}}>
-              <div style={{fontSize:28,fontWeight:800,color}}>{val}</div>
-              <div style={{fontSize:10,color,fontWeight:600,marginTop:2}}>{label}</div>
-            </div>
-          )}
-        </div>
-
-        <div className="drv-admin-body">
-        {/* GPS Completion Tracker — Enhanced */}
-        <div className="drv-full"><Card>
-          <h3 style={S.sec}>Complétion GPS</h3>
-          {(()=>{const noGps=sites.length-gpsCount;const pct=sites.length?Math.round(gpsCount/sites.length*100):0;
-            const mGps=mobileSites.filter(s=>s.lat&&s.lng&&!(s.lat===0&&s.lng===0)).length;
-            const fGps=fixeSites.filter(s=>s.lat&&s.lng&&!(s.lat===0&&s.lng===0)).length;
-            const pGps=poiSites.filter(s=>s.lat&&s.lng&&!(s.lat===0&&s.lng===0)).length;
-            return<>
-            {/* Big countdown number */}
-            <div style={{textAlign:"center",margin:"8px 0 12px"}}>
-              <div style={{fontSize:48,fontWeight:900,color:noGps>50?"#FF7900":noGps>10?"#E65100":"#4CAF50",lineHeight:1}}>{noGps}</div>
-              <div style={{fontSize:11,color:"#999",marginTop:2}}>sites sans GPS sur {sites.length}</div>
-            </div>
-            {/* Main progress bar */}
-            <div style={{height:10,borderRadius:5,background:"#E8E8E8",overflow:"hidden",marginBottom:4}}>
-              <div style={{height:"100%",borderRadius:5,background:`linear-gradient(90deg,${P},#4ECDC4)`,width:`${pct}%`,transition:"width 1s ease"}}/>
-            </div>
-            <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:"#999",marginBottom:10}}>
-              <span>{gpsCount} renseignés</span><span style={{fontWeight:700,color:P}}>{pct}%</span>
-            </div>
-            {/* Per type */}
-            {[[`Mobile`,mGps,mobileSites.length,P],[`Fixe`,fGps,fixeSites.length,"#E65100"],[`POI`,pGps,poiSites.length,"#FF8F00"]].map(([type,done,total,color])=>{
-              const p=total?Math.round(done/total*100):0;const rest=total-done;
-              return<div key={type} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 0"}}>
-                <div style={{width:8,height:8,borderRadius:4,background:color,flexShrink:0}}/>
-                <span style={{fontSize:11,fontWeight:600,width:45}}>{type}</span>
-                <div style={{flex:1,height:6,borderRadius:3,background:"#F0F0F0",overflow:"hidden"}}><div style={{height:"100%",borderRadius:3,background:color,width:`${p}%`}}/></div>
-                <span style={{fontSize:10,fontWeight:700,color,width:32,textAlign:"right"}}>{done}/{total}</span>
-                {rest>0&&<span style={{fontSize:8,color:"#E65100",fontWeight:600,width:40,textAlign:"right"}}>{rest} rest.</span>}
-                {rest===0&&<span style={{fontSize:8,color:"#4CAF50",fontWeight:600,width:40,textAlign:"right"}}>Complet</span>}
-              </div>;
-            })}
-            {/* Objective */}
-            {noGps>0&&<div style={{marginTop:8,padding:"6px 10px",background:noGps<=50?"#E8F5E9":"#FFF8E1",borderRadius:8,textAlign:"center"}}>
-              <span style={{fontSize:10,fontWeight:700,color:noGps<=50?"#2E7D32":"#E65100"}}>{noGps<=10?"Presque fini ! Plus que "+noGps+" !":noGps<=50?"Objectif atteint : sous les 50 ! Continue !":"Prochain objectif : passer sous 50 (encore "+(noGps-50)+")"}</span>
-            </div>}
-          </>;})()}
-        </Card></div>
-
-        {/* ANFR match progress */}
-        <div className="drv-full"><Card>
-          <h3 style={S.sec}>Correspondance ANFR</h3>
-          <div style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:6}}>
-            <span style={{color:"#666"}}>{anfrCount}/{mobileSites.length} sites mobile</span>
-            <span style={{fontWeight:700,color:"#7B1FA2"}}>{mobileSites.length?Math.round(anfrCount/mobileSites.length*100):0}%</span>
-          </div>
-          <div style={{height:10,borderRadius:5,background:"#E8E8E8",overflow:"hidden"}}>
-            <div style={{height:"100%",borderRadius:5,background:"linear-gradient(90deg,#9C27B0,#CE93D8)",width:`${mobileSites.length?anfrCount/mobileSites.length*100:0}%`,transition:"width 1s ease"}}/>
-          </div>
-        </Card></div>
-
-        {/* Techno distribution */}
-        <Card>
-          <h3 style={S.sec}>Technologies déployées</h3>
-          {techStats.map(([tech,count])=>{const pct=sites.length?Math.round(count/sites.length*100):0;return<div key={tech} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 0"}}>
-            <span style={{fontSize:12,fontWeight:600,width:42}}>{tech}</span>
-            <div style={{flex:1,height:8,borderRadius:4,background:"#F0F0F0",overflow:"hidden"}}>
-              <div style={{height:"100%",borderRadius:4,background:tech.includes("5G")?"#9C27B0":tech.includes("4G")||tech.includes("LTE")?"#1B8A6B":tech.includes("3G")?"#2196F3":tech.includes("2G")?"#FF9800":tech.includes("FH")?"#78909C":"#666",width:`${pct}%`,transition:"width .5s"}}/>
-            </div>
-            <span style={{fontSize:11,color:"#999",width:30,textAlign:"right"}}>{count}</span>
-          </div>;})}
-        </Card>
-
-        {/* Terrain constraints */}
-        <Card>
-          <h3 style={S.sec}>Contraintes terrain</h3>
-          <div style={{display:"flex",gap:12}}>
-            <div style={{flex:1,textAlign:"center",padding:10,background:"#FBE9E7",borderRadius:10}}>
-              <div style={{fontSize:22,fontWeight:800,color:"#BF360C"}}>{sites4x4}</div>
-              <div style={{fontSize:9,fontWeight:600,color:"#E64A19"}}>4x4</div>
-            </div>
-            <div style={{flex:1,textAlign:"center",padding:10,background:"#E3F2FD",borderRadius:10}}>
-              <div style={{fontSize:22,fontWeight:800,color:"#1565C0"}}>{sitesTer}</div>
-              <div style={{fontSize:9,fontWeight:600,color:"#1976D2"}}>Terrasse</div>
-            </div>
-            <div style={{flex:1,textAlign:"center",padding:10,background:"#FFF8E1",borderRadius:10}}>
-              <div style={{fontSize:22,fontWeight:800,color:"#FF8F00"}}>{sitesBin}</div>
-              <div style={{fontSize:9,fontWeight:600,color:"#FFA000"}}>Binôme</div>
-            </div>
-          </div>
-        </Card>
-
-        {/* Activity chart (#3) */}
-        <Card>
-          <h3 style={S.sec}>Activité 7 jours</h3>
-          <div style={{display:"flex",alignItems:"flex-end",gap:6,height:100}}>
-            {last7.map((d,i)=><div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
-              <span style={{fontSize:10,fontWeight:700,color:P}}>{d.count||""}</span>
-              <div style={{width:"100%",borderRadius:4,background:d.count>0?P:"#E8E8E8",height:`${Math.max(d.count/maxBar*70,4)}px`,transition:"height .5s ease"}}/>
-              <span style={{fontSize:8,color:"#999"}}>{d.date}</span>
-            </div>)}
-          </div>
-        </Card>
-
-        {/* Type chart (#4) */}
-        <Card>
-          <h3 style={S.sec}>Répartition</h3>
-          <div style={{display:"flex",gap:12,alignItems:"center"}}>
-            <div style={{width:80,height:80,borderRadius:40,background:`conic-gradient(${P} 0% ${sites.length?mobileSites.length/sites.length*100:33}%, #2E86C1 ${sites.length?mobileSites.length/sites.length*100:33}% ${sites.length?(mobileSites.length+fixeSites.length)/sites.length*100:66}%, #E67E22 ${sites.length?(mobileSites.length+fixeSites.length)/sites.length*100:66}% 100%)`,position:"relative"}}>
-              <div style={{position:"absolute",inset:12,borderRadius:40,background:"#fff"}}/>
-            </div>
-            <div>
-              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
-                <div style={{width:10,height:10,borderRadius:2,background:P}}/><span style={{fontSize:12,fontWeight:600}}>{mobileSites.length}</span><span style={{fontSize:11,color:"#999"}}>Mobile</span>
-              </div>
-              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
-                <div style={{width:10,height:10,borderRadius:2,background:"#2E86C1"}}/><span style={{fontSize:12,fontWeight:600}}>{fixeSites.length}</span><span style={{fontSize:11,color:"#999"}}>Fixe</span>
-              </div>
-              {poiSites.length>0&&<div style={{display:"flex",alignItems:"center",gap:6}}>
-                <div style={{width:10,height:10,borderRadius:2,background:"#E67E22"}}/><span style={{fontSize:12,fontWeight:600}}>{poiSites.length}</span><span style={{fontSize:11,color:"#999"}}>POI</span>
-              </div>}
-            </div>
-          </div>
-        </Card>
-
-        {/* Top techs (#5) */}
-        <Card>
-          <h3 style={S.sec}>Top techniciens ce mois</h3>
-          {topTechs.length===0?<p style={{color:"#CCC",fontSize:13}}>Aucune visite</p>:
-          topTechs.map(([code,count],i)=><div key={code} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",borderBottom:"1px solid #F5F5F5"}}>
-            <span style={{width:20,height:20,borderRadius:10,background:i===0?"#FFD700":i===1?"#C0C0C0":i===2?"#CD7F32":"#E8E8E8",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:i<3?"#fff":"#999"}}>{i+1}</span>
-            <TechAvatar code={code} size={22} fontSize={9}/>
-            <span style={{flex:1,fontSize:13,fontWeight:600}}>{code}</span>
-            <span style={{fontSize:13,fontWeight:700,color:P}}>{count} visites</span>
-          </div>)}
-        </Card>
-
-        {/* Live timeline (#7) */}
-        <div className="drv-full"><Card>
-          <h3 style={S.sec}><I.Act/> Activité récente</h3>
-          {activity.slice(0,10).map(a=>{const ac=ACT_CFG[a.action]||ACT_CFG.edit;const fields=a.action==="edit"?parseActFields(a.details):null;const site=sites.find(s=>s.id===a.site_id);return<div key={a.id} style={{background:"#fff",borderRadius:10,borderLeft:`3px solid ${ac.dot}`,padding:"8px 10px",marginBottom:5}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
-              <div style={{display:"flex",alignItems:"center",gap:5}}>
-                <TechAvatar code={a.technician_code} size={20} fontSize={7}/>
-                <span style={{fontSize:10,fontWeight:700,color:"#1A1A1A"}}>{techs.find(t=>t.code===a.technician_code)?.name||a.technician_code}</span>
-                <span style={{fontSize:8,fontWeight:700,padding:"2px 6px",borderRadius:5,background:ac.bg,color:ac.color}}>{ac.label}</span>
-              </div>
-              <span style={{fontSize:8,color:"#CCC"}}>{new Date(a.created_at).toLocaleString("fr",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})}</span>
-            </div>
-            <div style={{fontSize:12,fontWeight:800,color:ac.color}}>{site?.name||"Site inconnu"}</div>
-            {fields&&<div style={{display:"flex",gap:3,flexWrap:"wrap",marginTop:3}}>{fields.map((f,j)=><span key={j} style={{fontSize:8,fontWeight:600,padding:"2px 6px",borderRadius:5,background:"#F5F5F5",color:"#666"}}>{f}</span>)}</div>}
-            {a.action==="comment"&&a.details&&<p style={{fontSize:10,color:"#666",margin:"3px 0 0",lineHeight:1.4,borderLeft:"2px solid #C8E6C9",paddingLeft:8}}>"{a.details.slice(0,65)}{a.details.length>65?"...":""}"</p>}
-            {a.action==="photo"&&<span style={{fontSize:10,color:"#999"}}>Photo ajoutée</span>}
-            {a.action==="create"&&<span style={{fontSize:10,color:ac.color,fontWeight:600}}>Site créé</span>}
-          </div>})}
-        </Card></div>
-        </div>{/* end drv-admin-body */}
-      </>}
+      {tab==="dash"&&<AdminOverview sites={sites} techs={techs} visits={visits} logs={logs} activity={activity} onRefresh={loadAll} onNavigate={setTab} refreshedAt={refreshedAt}/>}
 
       {/* STATS — Top 10 + Audit + API */}
       {tab==="stats"&&<StatsPanel sites={sites} visits={visits} activity={activity} techs={techs}/>}
-      {tab==="team"&&<TeamStatsPanel sites={sites} techs={techs} flash={flash}/>}
+      {tab==="team"&&<AdminTeam techs={techs} query={dbGet} notify={flash}/>}
 
       {/* ANNONCES */}
       {tab==="annonces"&&<AnnouncementsPanel auth={auth}/>}
@@ -5676,7 +5473,9 @@ function AdminPanel({auth,onBack,logout}){
 
       {/* BACKUP */}
       {tab==="backup"&&<BackupPanel/>}
+      </main>
     </div>
+    {adminToast&&<div className="admin-toast">{adminToast}</div>}
   </>;
 }
 
