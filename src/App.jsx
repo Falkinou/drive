@@ -1,12 +1,14 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { lazy, Suspense, useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { ensureLeaflet } from "./leaflet";
-import Bacteria from "./Bacteria";
 import { ADMIN_SHELL_STYLE, AdminOverview, AdminTeam } from "./AdminDashboard";
+import { ADMIN_OPERATIONS_STYLE, AdminAudit, AdminLoginLogs, AdminSection, AdminSystem } from "./AdminOperations";
+
+const Bacteria=lazy(()=>import("./Bacteria"));
 
 // ============================================================
 // CONFIG
 // ============================================================
-const APP_VERSION="10.20.0";
+const APP_VERSION="10.21.0";
 const APP_BUILD="2026-09-10";
 const API="/api";
 
@@ -47,6 +49,7 @@ const dbGet=(t,f="")=>db('GET',t,{filter:f});
 const dbPost=(t,d)=>db('POST',t,{data:d,prefer:"return=representation"});
 const dbPatch=(t,d,f)=>db('PATCH',t,{data:d,filter:f,prefer:"return=representation"});
 const dbDel=(t,f)=>db('DELETE',t,{filter:f});
+const apiGet=async path=>{const r=await fetch(`${API}${path}`,{credentials:"include",headers:{Accept:"application/json"}});if(!r.ok)throw new Error(await r.text());return r.json();};
 
 // Soft delete: moves the item to the trash table before deleting from original
 // Types supported: "site", "note", "notebook", "section", "contact", "comment"
@@ -1174,7 +1177,7 @@ const c=ls.json("drv_cache");if(c){setSites(c);flash("Mode hors-ligne");}else fl
 
   // ---- BACTERIA ----
   if(page==="bacteria"){
-    return<Bacteria setPage={setPage} auth={auth} flash={flash}/>;
+    return<Suspense fallback={<div style={S.loadR}><div style={S.spin}/>Chargement de Bacteria…</div>}><Bacteria setPage={setPage} auth={auth} flash={flash}/></Suspense>;
   }
 
   // ---- MY ACTIVITY (#7) ----
@@ -4560,149 +4563,6 @@ function DailyChart({data}){
 }
 
 // ============================================================
-// TEAM STATS (#8) — Admin tab "Stats équipe"
-// ============================================================
-function TeamStatsPanel({sites,techs,flash}){
-  const[period,setPeriod]=useState("month");
-  const[loading,setLoading]=useState(true);
-  const[activity,setActivity]=useState([]);
-
-  const periodBounds=useMemo(()=>{
-    const now=new Date();
-    const start=new Date(now);
-    if(period==="month"){start.setDate(1);start.setHours(0,0,0,0);}
-    else if(period==="quarter"){start.setMonth(start.getMonth()-3);start.setHours(0,0,0,0);}
-    else if(period==="year"){start.setMonth(0);start.setDate(1);start.setHours(0,0,0,0);}
-    else if(period==="all"){start.setFullYear(2020);}
-    return{from:start,to:now};
-  },[period]);
-
-  useEffect(()=>{
-    let cancelled=false;
-    (async()=>{
-      setLoading(true);
-      try{
-        const fromIso=periodBounds.from.toISOString();
-        const acts=await dbGet("activity_log",`created_at=gte.${fromIso}&order=created_at.desc&limit=10000`);
-        if(!cancelled)setActivity(acts||[]);
-      }catch(e){flash("Erreur chargement");}
-      if(!cancelled)setLoading(false);
-    })();
-    return()=>{cancelled=true;};
-  },[period]);
-
-  // Stats per technician
-  const techStats=useMemo(()=>{
-    const map={};
-    for(const a of activity){
-      const k=a.technician_code;
-      if(!map[k])map[k]={code:k,total:0,sites:new Set(),photos:0,notes:0,edits:0};
-      map[k].total++;
-      map[k].sites.add(a.site_id);
-      if(a.action==="photo")map[k].photos++;
-      else if(a.action==="comment")map[k].notes++;
-      else if(a.action==="edit")map[k].edits++;
-    }
-    return Object.values(map).map(t=>{
-      const tech=techs.find(x=>x.code===t.code);
-      return{...t,sites:t.sites.size,name:tech?tech.name:t.code};
-    }).sort((a,b)=>b.total-a.total);
-  },[activity,techs]);
-
-  // Most-visited sites
-  const hotSites=useMemo(()=>{
-    const counts={};
-    for(const a of activity){counts[a.site_id]=(counts[a.site_id]||0)+1;}
-    return Object.entries(counts).map(([id,n])=>{
-      const s=sites.find(x=>x.id===id);
-      return{site:s,count:n,id};
-    }).filter(x=>x.site).sort((a,b)=>b.count-a.count).slice(0,8);
-  },[activity,sites]);
-
-  // Sites jamais visités
-  const coldSites=useMemo(()=>{
-    const visitedIds=new Set(activity.map(a=>a.site_id));
-    return sites.filter(s=>!visitedIds.has(s.id)&&!s.deleted_at).slice(0,20);
-  },[activity,sites]);
-
-  const exportCSV=()=>{
-    const rows=[["Technicien","Code","Total actions","Sites uniques","Photos","Notes","Modifs"]];
-    for(const t of techStats){rows.push([t.name,t.code,t.total,t.sites,t.photos,t.notes,t.edits]);}
-    const csv=rows.map(r=>r.map(c=>`"${(c||"").toString().replace(/"/g,'""')}"`).join(",")).join("\n");
-    const blob=new Blob([csv],{type:"text/csv;charset=utf-8"});
-    const url=URL.createObjectURL(blob);
-    const link=document.createElement("a");
-    link.href=url;
-    link.download=`stats-equipe-${period}-${new Date().toISOString().slice(0,10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
-    flash("CSV exporté ✓");
-  };
-
-  const periodLabels={month:"Ce mois",quarter:"3 mois",year:"Année",all:"Tout"};
-  const maxTotal=Math.max(...techStats.map(t=>t.total),1);
-
-  return<>
-    <Card>
-      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-        <h3 style={{...S.sec,marginBottom:0,flex:1}}>📊 Stats équipe</h3>
-        <button onClick={exportCSV} disabled={!techStats.length} style={{background:techStats.length?P:"#E0E0E0",border:"none",color:"#fff",padding:"5px 10px",borderRadius:7,fontSize:10,fontWeight:800,cursor:techStats.length?"pointer":"not-allowed"}}>CSV</button>
-      </div>
-      <div style={{display:"flex",gap:5,marginBottom:12,overflowX:"auto",paddingBottom:2}}>
-        {Object.entries(periodLabels).map(([k,l])=><button key={k} onClick={()=>setPeriod(k)} style={{padding:"5px 10px",borderRadius:7,border:period===k?`2px solid ${P}`:"1px solid #E0E0E0",background:period===k?`${P}12`:"#fff",color:period===k?P:"#666",fontSize:11,fontWeight:800,cursor:"pointer",flexShrink:0,whiteSpace:"nowrap"}}>{l}</button>)}
-      </div>
-
-      {loading?<div style={{textAlign:"center",padding:30,color:"#999"}}>Chargement...</div>:<>
-
-        {/* Tech ranking with bars */}
-        <div style={{marginBottom:8}}>
-          {techStats.length===0?<div style={{textAlign:"center",padding:20,color:"#999",fontSize:12}}>Aucune donnée sur la période</div>:
-          techStats.map((t,i)=><div key={t.code} style={{padding:"7px 0",borderBottom:i<techStats.length-1?"1px solid #F5F5F5":"none"}}>
-            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
-              <div style={{width:22,height:22,borderRadius:6,background:i===0?"#FFD54F":i===1?"#E0E0E0":i===2?"#FFAB91":"#F5F5F5",color:"#5C3317",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:900,flexShrink:0}}>{i+1}</div>
-              <div style={{flex:1,minWidth:0}}>
-                <div style={{fontSize:12,fontWeight:800,color:"#1A1A1A",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.name}</div>
-                <div style={{fontSize:9,color:"#999",fontFamily:"monospace"}}>{t.code}</div>
-              </div>
-              <div style={{fontSize:13,fontWeight:900,color:P}}>{t.total}</div>
-            </div>
-            <div style={{height:5,background:"#F5F5F5",borderRadius:3,overflow:"hidden"}}>
-              <div style={{height:"100%",width:`${(t.total/maxTotal)*100}%`,background:P,borderRadius:3}}/>
-            </div>
-            <div style={{display:"flex",gap:8,marginTop:3,fontSize:9,color:"#999"}}>
-              <span>🏢 {t.sites}</span><span>📷 {t.photos}</span><span>📝 {t.notes}</span><span>✏️ {t.edits}</span>
-            </div>
-          </div>)}
-        </div>
-
-      </>}
-    </Card>
-
-    {hotSites.length>0&&<Card>
-      <h3 style={S.sec}>🔥 Sites les plus visités</h3>
-      <div style={{fontSize:10,color:"#999",marginBottom:8}}>Potentiels problèmes récurrents</div>
-      {hotSites.map((s,i)=><div key={s.id} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 0",borderBottom:i<hotSites.length-1?"1px solid #F5F5F5":"none"}}>
-        <div style={{flex:1,minWidth:0}}>
-          <div style={{fontSize:12,fontWeight:700,color:"#1A1A1A",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{s.site.name}</div>
-          <div style={{fontSize:9,color:"#999",fontFamily:"monospace"}}>{s.site.code_nidt||"—"} · {s.site.type}</div>
-        </div>
-        <div style={{fontSize:11,fontWeight:900,color:s.count>=10?"#D32F2F":s.count>=5?"#FF9800":"#666",background:s.count>=10?"#FFEBEE":s.count>=5?"#FFF3E0":"#F5F5F5",padding:"3px 8px",borderRadius:6}}>{s.count}</div>
-      </div>)}
-    </Card>}
-
-    {coldSites.length>0&&<Card>
-      <h3 style={S.sec}>❄️ Sites jamais visités</h3>
-      <div style={{fontSize:10,color:"#999",marginBottom:8}}>Aucune activité sur la période ({coldSites.length} affichés)</div>
-      {coldSites.slice(0,10).map((s,i)=><div key={s.id} style={{padding:"6px 0",borderBottom:i<Math.min(coldSites.length,10)-1?"1px solid #F5F5F5":"none"}}>
-        <div style={{fontSize:12,fontWeight:700,color:"#666",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{s.name}</div>
-        <div style={{fontSize:9,color:"#BBB",fontFamily:"monospace"}}>{s.code_nidt||"—"} · {s.type}</div>
-      </div>)}
-      {coldSites.length>10&&<div style={{fontSize:10,color:"#999",textAlign:"center",paddingTop:6}}>+{coldSites.length-10} autres</div>}
-    </Card>}
-  </>;
-}
-
-// ============================================================
 // SITE HISTORY (#9) — Timeline of site activity
 // ============================================================
 function SiteHistorySection({siteId,techs}){
@@ -5390,15 +5250,18 @@ function AnnouncementsPanel({auth}){
 // ADMIN PANEL
 // ============================================================
 function AdminPanel({auth,onBack,logout}){
-  const[tab,setTab]=useState("dash"); // dash|techs|sites|logs
+  const[tab,setTab]=useState("dash");
   const[sites,setSites]=useState([]);
   const[techs,setTechs]=useState([]);
+  const[dashboard,setDashboard]=useState(null);
   const[visits,setVisits]=useState([]);
   const[logs,setLogs]=useState([]);
   const[activity,setActivity]=useState([]);
   const[loading,setLoading]=useState(true);
+  const[secondaryLoading,setSecondaryLoading]=useState(false);
+  const[statsLoaded,setStatsLoaded]=useState(false);
+  const[logsLoaded,setLogsLoaded]=useState(false);
   const[loadError,setLoadError]=useState("");
-  const[refreshedAt,setRefreshedAt]=useState(null);
   const[adminToast,setAdminToast]=useState("");
 
   const flash=message=>{setAdminToast(message);setTimeout(()=>setAdminToast(""),2600);};
@@ -5411,23 +5274,25 @@ function AdminPanel({auth,onBack,logout}){
     const results=await Promise.allSettled([
       dbGet("sites","select=id,name,type,lat,lng,address,code_nidt,needs_4x4,needs_binome,needs_terrasse,anfr_support_id,technologies&order=name.asc"),
       dbGet("technicians","order=code.asc"),
-      dbGet("visits","order=visited_at.desc&limit=10000"),
-      dbGet("login_logs","order=created_at.desc&limit=500"),
-      dbGet("activity_log","order=created_at.desc&limit=100"),
+      apiGet("/admin/dashboard"),
     ]);
-    const setters=[setSites,setTechs,setVisits,setLogs,setActivity];
+    const setters=[setSites,setTechs,setDashboard];
     results.forEach((result,index)=>{if(result.status==="fulfilled")setters[index](result.value||[]);});
     if(results.some(result=>result.status==="rejected"))setLoadError("Certaines données n’ont pas pu être actualisées.");
-    setRefreshedAt(new Date());
     setLoading(false);
   };
 
+  useEffect(()=>{
+    if(tab==="stats"&&!statsLoaded){setSecondaryLoading(true);Promise.all([dbGet("visits","order=visited_at.desc&limit=10000"),dbGet("activity_log","order=created_at.desc&limit=10000")]).then(([v,a])=>{setVisits(v||[]);setActivity(a||[]);setStatsLoaded(true);}).catch(()=>flash("Erreur de chargement des statistiques")).finally(()=>setSecondaryLoading(false));}
+    if(tab==="logs"&&!logsLoaded){setSecondaryLoading(true);dbGet("login_logs","order=created_at.desc&limit=500").then(rows=>{setLogs(rows||[]);setLogsLoaded(true);}).catch(()=>flash("Erreur de chargement des connexions")).finally(()=>setSecondaryLoading(false));}
+  },[tab,statsLoaded,logsLoaded]);
+
   if(loading)return<><TopBar t="Admin" onBack={onBack}/><div style={S.loadR}><div style={S.spin}/>Chargement...</div></>;
 
-  const adminTabs=[["dash","⌂","Vue d’ensemble"],["team","◉","Équipe"],["techs","♙","Comptes"],["sites","⌖","Sites"],["stats","↗","Statistiques"],["annonces","◌","Annonces"],["duplicates","◇","Doublons"],["logs","≡","Connexions"],["trash","⌫","Corbeille"],["health","♡","Santé"],["backup","↓","Sauvegardes"]];
+  const adminTabs=[["dash","⌂","Vue d’ensemble"],["team","◉","Équipe"],["techs","♙","Comptes"],["sites","⌖","Sites"],["stats","↗","Statistiques"],["annonces","◌","Annonces"],["duplicates","◇","Doublons"],["logs","≡","Connexions"],["trash","⌫","Corbeille"],["health","♡","VPS"],["audit","◫","Audit"],["backup","↓","Sauvegardes"]];
 
   return<>
-    <style>{ADMIN_SHELL_STYLE}</style>
+    <style>{ADMIN_SHELL_STYLE}{ADMIN_OPERATIONS_STYLE}</style>
     <TopBar t="Admin" onBack={onBack}/>
     <div className="admin-page">
       <nav className="admin-tabs" aria-label="Sections administrateur">{adminTabs.map(([key,icon,label])=><button key={key} className={`admin-tab ${tab===key?"active":""}`} onClick={()=>setTab(key)}>{icon} {label}</button>)}</nav>
@@ -5435,176 +5300,45 @@ function AdminPanel({auth,onBack,logout}){
       {loadError&&<div style={{background:"#FFF1EF",border:"1px solid #FFD4CE",color:"#A63B30",padding:"10px 12px",borderRadius:12,fontSize:10,fontWeight:700,marginBottom:10}}>{loadError} <button onClick={loadAll} style={{border:0,background:"none",color:"inherit",fontWeight:900,textDecoration:"underline",cursor:"pointer"}}>Réessayer</button></div>}
 
       {/* DASHBOARD */}
-      {tab==="dash"&&<AdminOverview sites={sites} techs={techs} visits={visits} logs={logs} activity={activity} onRefresh={loadAll} onNavigate={setTab} refreshedAt={refreshedAt}/>}
+      {tab==="dash"&&<AdminOverview data={dashboard} onRefresh={loadAll}/>}
 
       {/* STATS — Top 10 + Audit + API */}
-      {tab==="stats"&&<StatsPanel sites={sites} visits={visits} activity={activity} techs={techs}/>}
-      {tab==="team"&&<AdminTeam techs={techs} query={dbGet} notify={flash}/>}
+      {tab==="stats"&&(secondaryLoading&&!statsLoaded?<div style={S.loadR}><div style={S.spin}/>Chargement…</div>:<AdminSection title="Statistiques terrain" subtitle="Analyse des sites, visites et contributions."><StatsPanel sites={sites} visits={visits} activity={activity} techs={techs}/></AdminSection>)}
+      {tab==="team"&&<AdminTeam request={apiGet} notify={flash}/>}
 
       {/* ANNONCES */}
-      {tab==="annonces"&&<AnnouncementsPanel auth={auth}/>}
+      {tab==="annonces"&&<AdminSection title="Annonces" subtitle="Messages visibles par toute l’équipe."><AnnouncementsPanel auth={auth}/></AdminSection>}
 
       {/* TECHNICIENS */}
-      {tab==="techs"&&<TechsAdmin techs={techs} reload={loadAll}/>}
+      {tab==="techs"&&<AdminSection title="Comptes" subtitle="Accès, rôles et état des techniciens."><TechsAdmin techs={techs} reload={loadAll}/></AdminSection>}
 
       {/* SITES TABLE */}
-      {tab==="sites"&&<SitesAdmin sites={sites} reload={loadAll}/>}
+      {tab==="sites"&&<AdminSection title="Référentiel sites" subtitle="Recherche, tri et contrôle de la qualité des données."><SitesAdmin sites={sites} reload={loadAll}/></AdminSection>}
 
       {/* LOGS */}
-      {tab==="logs"&&<>
-        <Card>
-          <h3 style={S.sec}><I.Shield/> Connexions récentes</h3>
-          {logs.map(l=><div key={l.id} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:"1px solid #F8F8F8",fontSize:11}}>
-            <span style={{fontWeight:600,color:l.success?P:"#E74C3C"}}>{l.technician_code||"?"}</span>
-            <span style={{color:l.success?"#999":"#E74C3C"}}>{l.success?"✓":"✗"} {new Date(l.created_at).toLocaleString("fr",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})}</span>
-          </div>)}
-        </Card>
-      </>}
+      {tab==="logs"&&<AdminLoginLogs logs={logs} loading={secondaryLoading&&!logsLoaded}/>}
 
 
       {/* TRASH */}
-      {tab==="trash"&&<TrashPanel auth={auth} flash={flash}/>}
+      {tab==="trash"&&<AdminSection title="Corbeille" subtitle="Éléments supprimés et restaurations contrôlées."><TrashPanel auth={auth} flash={flash}/></AdminSection>}
 
       {/* DUPLICATES */}
-      {tab==="duplicates"&&<DuplicatesPanel sites={sites} reload={loadAll} flash={flash} auth={auth}/>}
+      {tab==="duplicates"&&<AdminSection title="Doublons" subtitle="Détection et fusion des données répétées."><DuplicatesPanel sites={sites} reload={loadAll} flash={flash} auth={auth}/></AdminSection>}
 
       {/* HEALTH */}
-      {tab==="health"&&<HealthPanel sites={sites} techs={techs}/>}
+      {tab==="health"&&<AdminSystem request={apiGet}/>}
+
+      {/* AUDIT */}
+      {tab==="audit"&&<AdminAudit request={apiGet}/>}
 
       {/* BACKUP */}
-      {tab==="backup"&&<BackupPanel/>}
+      {tab==="backup"&&<AdminSection title="Sauvegardes" subtitle="Exports, restauration et protection des données."><BackupPanel/></AdminSection>}
       </main>
     </div>
     {adminToast&&<div className="admin-toast">{adminToast}</div>}
   </>;
 }
 
-
-// ============================================================
-// HEALTH & MONITORING PANEL
-// ============================================================
-function HealthPanel({sites,techs}){
-  const[checks,setChecks]=useState({});
-  const[checking,setChecking]=useState(false);
-  const[perf,setPerf]=useState({});
-  const[anomalies,setAnomalies]=useState([]);
-
-  useEffect(()=>{detectAnomalies();},[sites]);
-
-  // Data anomaly detection (#188)
-  const detectAnomalies=()=>{
-    const issues=[];
-    sites.forEach(s=>{
-      if(!s.lat||!s.lng||(s.lat===0&&s.lng===0))issues.push({type:"gps_missing",site:s.name,id:s.id,msg:"GPS manquant (0,0)",severity:"warning"});
-      if(s.lat&&(s.lat<46.5||s.lat>49.5))issues.push({type:"gps_outlier",site:s.name,id:s.id,msg:`Lat ${s.lat?.toFixed(2)} hors Alsace`,severity:"error"});
-      if(s.lng&&(s.lng<5.5||s.lng>8.5))issues.push({type:"gps_outlier",site:s.name,id:s.id,msg:`Lng ${s.lng?.toFixed(2)} hors Alsace`,severity:"error"});
-      if(!s.name||s.name.trim().length<2)issues.push({type:"name_empty",site:s.name||"(vide)",id:s.id,msg:"Nom vide ou trop court",severity:"warning"});
-      if(s.type==="mobile"&&(!s.technologies||s.technologies.length===0))issues.push({type:"no_tech",site:s.name,id:s.id,msg:"Aucune technologie renseignée",severity:"info"});
-    });
-    // Duplicates check (same name or same GPS within 10m)
-    for(let i=0;i<sites.length;i++){
-      for(let j=i+1;j<sites.length;j++){
-        if(sites[i].name&&sites[j].name&&sites[i].name.toLowerCase()===sites[j].name.toLowerCase()){
-          issues.push({type:"duplicate_name",site:sites[i].name,id:sites[i].id,msg:`Doublon de nom avec ID ${sites[j].id}`,severity:"warning"});
-        }
-      }
-    }
-    setAnomalies(issues);
-  };
-
-  // API health check (#191)
-  const runHealthChecks=async()=>{
-    setChecking(true);const results={};const timings={};
-    // DRIVE API + PostgreSQL
-    try{
-      const t0=performance.now();
-      const r=await fetch("/health");
-      timings.database=Math.round(performance.now()-t0);
-      results.database=r.ok?"ok":"error";
-    }catch(e){results.database="offline";timings.database=null;}
-    // Fuel service
-    try{
-      const t0=performance.now();
-      const r=await fetch(`${FUEL_API_URL}?deps=67`,{credentials:"include"});
-      timings.fuel=Math.round(performance.now()-t0);
-      results.fuel=r.ok?"ok":"error";
-    }catch(e){results.fuel="offline";timings.fuel=null;}
-    // Open-Meteo
-    try{
-      const t0=performance.now();
-      const r=await fetch("https://api.open-meteo.com/v1/forecast?latitude=48.5&longitude=7.5&current=temperature_2m&timezone=auto");
-      timings.meteo=Math.round(performance.now()-t0);
-      results.meteo=r.ok?"ok":"error";
-    }catch(e){results.meteo="offline";timings.meteo=null;}
-    // Nominatim
-    try{
-      const t0=performance.now();
-      const r=await fetch("https://nominatim.openstreetmap.org/status.php?format=json");
-      timings.nominatim=Math.round(performance.now()-t0);
-      results.nominatim=r.ok?"ok":"error";
-    }catch(e){results.nominatim="offline";timings.nominatim=null;}
-    setChecks(results);setPerf(timings);setChecking(false);
-  };
-
-  const statusColor=s=>s==="ok"?"#1B8A6B":s==="error"?"#E74C3C":"#999";
-  const statusIcon=s=>s==="ok"?"✅":s==="error"?"❌":"⏳";
-  const sevColor=s=>s==="error"?"#E74C3C":s==="warning"?"#E67E22":"#2196F3";
-  const sevIcon=s=>s==="error"?"🔴":s==="warning"?"🟡":"🔵";
-
-  return<>
-    {/* API Health */}
-    <Card>
-      <h3 style={S.sec}><I.Act/> Santé des APIs</h3>
-      <button onClick={runHealthChecks} disabled={checking} style={{...S.subBtn,width:"100%",marginBottom:12,opacity:checking?.6:1}}>{checking?<><div style={S.spin}/> Test en cours...</>:<><I.Ref/> Lancer le diagnostic</>}</button>
-      {Object.keys(checks).length>0&&<div style={{display:"flex",flexDirection:"column",gap:6}}>
-        {[["database","DRIVE API + PostgreSQL"],["fuel","Service carburants"],["meteo","Open-Meteo (Météo)"],["nominatim","Nominatim (Géocodage)"]].map(([k,label])=>
-          <div key={k} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderRadius:10,background:checks[k]==="ok"?"#E8F8F5":"#FFF5F5",border:`1px solid ${checks[k]==="ok"?"#B2DFDB":"#FFCDD2"}`}}>
-            <span style={{fontSize:18}}>{statusIcon(checks[k])}</span>
-            <div style={{flex:1}}>
-              <div style={{fontSize:12,fontWeight:600,color:statusColor(checks[k])}}>{label}</div>
-              {perf[k]!=null&&<div style={{fontSize:10,color:"#999"}}>{perf[k]}ms</div>}
-            </div>
-            <span style={{fontSize:10,fontWeight:700,color:statusColor(checks[k]),textTransform:"uppercase"}}>{checks[k]}</span>
-          </div>
-        )}
-      </div>}
-    </Card>
-
-    {/* Performance */}
-    {Object.keys(perf).length>0&&<Card>
-      <h3 style={S.sec}><I.Bar/> Latence APIs</h3>
-      <div style={{display:"flex",alignItems:"flex-end",gap:8,height:100}}>
-        {[["database","DRIVE"],["fuel","Carburant"],["meteo","Météo"],["nominatim","Géocode"]].map(([k,l])=>{
-          const ms=perf[k]||0;const maxMs=Math.max(...Object.values(perf).filter(v=>v!=null),100);
-          const pct=maxMs>0?ms/maxMs*80:0;
-          const color=ms<200?"#1B8A6B":ms<500?"#E67E22":"#E74C3C";
-          return<div key={k} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
-            <span style={{fontSize:9,fontWeight:700,color}}>{ms}ms</span>
-            <div style={{width:"100%",borderRadius:4,background:color,height:`${Math.max(pct,5)}%`,transition:"height .5s",minHeight:4}}/>
-            <span style={{fontSize:7,color:"#999",textAlign:"center"}}>{l}</span>
-          </div>;
-        })}
-      </div>
-    </Card>}
-
-    {/* Anomalies */}
-    <Card>
-      <h3 style={S.sec}>⚠️ Anomalies données ({anomalies.length})</h3>
-      {anomalies.length===0?<p style={{color:"#1B8A6B",fontSize:12,textAlign:"center",padding:12}}>✅ Aucune anomalie détectée</p>
-      :<div style={{maxHeight:300,overflowY:"auto"}}>
-        {anomalies.slice(0,30).map((a,i)=><div key={i} style={{display:"flex",alignItems:"flex-start",gap:8,padding:"8px 0",borderBottom:"1px solid #F5F5F5"}}>
-          <span style={{fontSize:14,flexShrink:0,marginTop:1}}>{sevIcon(a.severity)}</span>
-          <div style={{flex:1,minWidth:0}}>
-            <div style={{fontSize:12,fontWeight:600,color:"#1A1A1A",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{a.site}</div>
-            <div style={{fontSize:10,color:sevColor(a.severity)}}>{a.msg}</div>
-          </div>
-          <span style={{fontSize:8,color:"#BBB",fontFamily:"monospace",flexShrink:0}}>#{a.id}</span>
-        </div>)}
-        {anomalies.length>30&&<p style={{fontSize:10,color:"#999",textAlign:"center",padding:8}}>+{anomalies.length-30} autres anomalies</p>}
-      </div>}
-    </Card>
-  </>;
-}
 
 // ============================================================
 // BACKUP PANEL
@@ -5737,7 +5471,7 @@ function BackupPanel(){
   // Restore from JSON backup
   const handleRestore=async(e)=>{
     const file=e.target.files[0];if(!file)return;
-    if(!await confirmDark("Restaurer ce backup ?",{danger:true,hint:"Les données actuelles seront ÉCRASÉES",yesLabel:"Restaurer"}))return;
+    if(!await confirmDark("Restaurer ce backup ?",{danger:true,hint:"Les lignes ayant le même ID seront remplacées. Cette action sera inscrite dans l’audit.",yesLabel:"Restaurer"}))return;
     setRestoring(true);setStatus("Lecture du fichier...");
     try{
       const text=await file.text();
@@ -5818,7 +5552,7 @@ function TechsAdmin({techs,reload}){
 
   const setPin=async(id,pin)=>{const r=await fetch(`${API}/admin/technicians/${id}/pin`,{method:"POST",headers:{"Content-Type":"application/json"},credentials:"include",body:JSON.stringify({pin})});if(!r.ok)throw new Error((await r.json()).error||"Erreur PIN");};
   const add=async()=>{if(!nc.trim()||np.length!==4)return;try{const created=await dbPost("technicians",{code:nc.trim().toUpperCase(),name:nn.trim(),role:nr});await setPin(created[0].id,np);setNc("");setNn("");setNp("");flash("Profil créé ✓");reload();}catch(e){flash("Erreur (code existant ?)");}};
-  const toggle=async(t)=>{try{await dbPatch("technicians",{active:!t.active},`id=eq.${t.id}`);reload();}catch(e){}};
+  const toggle=async(t)=>{if(t.active!==false&&!await confirmDark(`Désactiver ${t.code} ?`,{danger:true,hint:"Son accès sera immédiatement bloqué.",yesLabel:"Désactiver"}))return;try{await dbPatch("technicians",{active:!t.active},`id=eq.${t.id}`);reload();flash(t.active===false?"Compte réactivé ✓":"Compte désactivé ✓");}catch(e){flash("Erreur");}};
   const del=async(t)=>{if(!await confirmDark(`Supprimer ${t.code} ?`,{danger:true,yesLabel:"Supprimer"}))return;try{await dbDel("technicians",`id=eq.${t.id}`);reload();}catch(e){}};
   const resetPin=async(t)=>{if(!await confirmDark(`Réinitialiser le PIN de ${t.code} ?`,{hint:"Un nouveau PIN temporaire sera généré",yesLabel:"Réinitialiser"}))return;try{const pin=String(crypto.getRandomValues(new Uint32Array(1))[0]%10000).padStart(4,"0");await setPin(t.id,pin);flash(`Nouveau PIN ${t.code} : ${pin}`);reload();}catch(e){flash("Erreur");}};
 

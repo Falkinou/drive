@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import argon2 from "argon2";
 import { rateLimit } from "express-rate-limit";
 import { pool, transaction } from "./db.js";
+import { tryAdminAudit } from "./audit.js";
 
 const COOKIE_NAME = "drive_session";
 const ttlDays = Math.min(30, Math.max(1, Number(process.env.SESSION_TTL_DAYS || 30)));
@@ -195,6 +196,7 @@ export function registerAuthRoutes(app) {
       );
       if (result.rowCount !== 1) return res.status(404).json({ error: "Technicien introuvable" });
       await pool.query("delete from sessions where technician_id = $1", [req.params.id]);
+      await tryAdminAudit(req.auth, req, "reset_pin", "technicians", req.params.id);
       return res.status(204).end();
     } catch (error) {
       return next(error);

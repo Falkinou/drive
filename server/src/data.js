@@ -1,6 +1,7 @@
 import format from "pg-format";
 import { pool } from "./db.js";
 import { requireAuth } from "./auth.js";
+import { tryAdminAudit } from "./audit.js";
 
 const TABLE_ACCESS = {
   sites: { read: "tech", write: "tech" },
@@ -190,6 +191,7 @@ export function registerDataRoutes(app) {
       const values = Object.values(payload);
       const sql = `insert into ${format("%I", req.params.table)} (${keys.map(key => format("%I", key)).join(",")}) values (${values.map((_, index) => `$${index + 1}`).join(",")}) returning *`;
       const result = await pool.query(sql, values);
+      if (req.auth.role === "admin") await tryAdminAudit(req.auth, req, "create", req.params.table, result.rows[0]?.id, payload);
       return res.status(201).json(result.rows);
     } catch (error) {
       return reject(error, res, next);
@@ -222,6 +224,7 @@ export function registerDataRoutes(app) {
       if (!where) return res.status(400).json({ error: "Un filtre est requis" });
       const sql = `update ${format("%I", table)} set ${assignments.join(", ")}${where} returning *`;
       const result = await pool.query(sql, values);
+      if (req.auth.role === "admin") await tryAdminAudit(req.auth, req, "update", table, result.rows[0]?.id, { fields: Object.keys(payload), affected: result.rowCount });
       return res.json(result.rows);
     } catch (error) {
       return reject(error, res, next);
@@ -238,7 +241,8 @@ export function registerDataRoutes(app) {
       const params = new URLSearchParams(req.originalUrl.split("?")[1] || "");
       const where = buildWhere(params, columns, values);
       if (!where) return res.status(400).json({ error: "Un filtre est requis" });
-      await pool.query(`delete from ${format("%I", req.params.table)}${where}`, values);
+      const result = await pool.query(`delete from ${format("%I", req.params.table)}${where}`, values);
+      if (req.auth.role === "admin") await tryAdminAudit(req.auth, req, "delete", req.params.table, null, { affected: result.rowCount, filter: req.originalUrl.split("?")[1] || "" });
       return res.status(204).end();
     } catch (error) {
       return reject(error, res, next);

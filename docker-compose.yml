@@ -43,8 +43,10 @@ services:
       UPLOAD_DIR: /data/uploads
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-12}
       FUEL_DATA_API_URL: ${FUEL_DATA_API_URL:-https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records}
+      BACKUP_DIR: /data/backups
     volumes:
       - ${DRIVE_DATA_PATH:-/opt/drive/data}/uploads:/data/uploads
+      - ${DRIVE_DATA_PATH:-/opt/drive/data}/backups:/data/backups:ro
     expose:
       - "3000"
     networks:
