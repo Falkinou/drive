@@ -1,0 +1,22 @@
+{
+  "name": "drive-api",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "argon2": "^0.45.1",
+    "cookie-parser": "^1.4.7",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.7.0",
+    "multer": "^2.3.0",
+    "pg": "^8.23.0",
+    "pg-format": "^1.0.4"
+  }
+}

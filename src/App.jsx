@@ -1,14 +1,12 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { ensureLeaflet } from "./leaflet";
 
 // ============================================================
 // CONFIG
 // ============================================================
-const SB="https://cicndnlxwjitxroqtbnr.supabase.co";
-const APP_VERSION="10.18.1";
-const APP_BUILD="2026-04-17";
-const SK="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNpY25kbmx4d2ppdHhyb3F0Ym5yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQxMDMzNjcsImV4cCI6MjA4OTY3OTM2N30.x-hxZBMPGzpDSWmbekQAxMQ6BD3R1EUzkB1noHBlEoQ";
-const H={"apikey":SK,"Authorization":`Bearer ${SK}`,"Content-Type":"application/json"};
-const SDAYS=30;
+const APP_VERSION="10.18.2";
+const APP_BUILD="2026-09-09";
+const API="/api";
 
 // Fuel types
 const TOTEMBOX_NIDTS=new Set(["00000307S1","00000072S1","00000386S1","TP13372S1","00000315S1","00004946S1","00000223L1","00000306S1","00000321S1","00000375S1","00000064S1","00005019S1","00000172S1","00000314S1","00004938S1","00016073S1","00009277S1","00000071S1","00000320S1","00000503S1","00008649S1","00004986S1","00007531S1","00018499S1","00005151S1","00015332S1","00015044S1","00017601S1","00000310S1","00019698S1","00000495S1","00005029S1","00008337S1","00000048S1"]);
@@ -27,18 +25,18 @@ const WEX_BRANDS=["LECLERC","ENI","ESSO","ESSO EXPRESS","FAL","FULLI","IDS","ROM
 const GR_BRANDS=["TOTALENERGIES","TOTAL ACCESS","TOTAL","TOTALENERGIES ACCESS"];
 const getCardType=brand=>{if(!brand)return null;const b=brand.toUpperCase().trim();if(WEX_BRANDS.some(w=>b.includes(w)))return"wex";if(GR_BRANDS.some(g=>b.includes(g)))return"gr";return null;};
 const timeAgo=d=>{if(!d)return"";const ms=Date.now()-new Date(d).getTime();if(ms<0)return"";const min=Math.floor(ms/60000);if(min<1)return"à l'instant";if(min<60)return min+"min";const h=Math.floor(min/60);if(h<24)return h+"h";const j=Math.floor(h/24);return j+"j";};
-const FUEL_API_URL="https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records";
+const FUEL_API_URL=`${API}/fuel-prices`;
 
 // API
 async function db(method,t,opts={}){
   const{data,filter,prefer}=opts;
-  const url=`${SB}/rest/v1/${t}${filter?'?'+filter:''}`;
-  const h={...H};
+  const url=`${API}/data/${t}${filter?'?'+filter:''}`;
+  const h={"Accept":"application/json"};
+  if(data)h["Content-Type"]="application/json";
   if(prefer)h.Prefer=prefer;
-  if(method==='GET')h.Accept="application/json";
   // Track API call for stats (keep last 10000, trimmed to 30 days)
   try{const key="drv_api_log";const log=JSON.parse(localStorage.getItem(key)||"[]");const now=Date.now();const cutoff=now-30*24*3600*1000;const trimmed=log.filter(t=>t>cutoff);trimmed.push(now);if(trimmed.length>10000)trimmed.splice(0,trimmed.length-10000);localStorage.setItem(key,JSON.stringify(trimmed));}catch(e){}
-  const r=await fetch(url,{method,headers:h,...(data?{body:JSON.stringify(data)}:{})});
+  const r=await fetch(url,{method,headers:h,credentials:"include",...(data?{body:JSON.stringify(data)}:{})});
   if(!r.ok)throw new Error(await r.text());
   if(method==='DELETE')return;
   return r.json();
@@ -66,8 +64,8 @@ async function softDelete(type,id,data,auth){
 
 // Photo helpers
 async function compressImg(file,max=1200){return new Promise(res=>{const img=new Image();img.onload=()=>{const c=document.createElement("canvas");const r=Math.min(max/img.width,max/img.height,1);c.width=img.width*r;c.height=img.height*r;c.getContext("2d").drawImage(img,0,0,c.width,c.height);c.toBlob(b=>res(b),"image/jpeg",0.8);};img.src=URL.createObjectURL(file);});}
-async function upPhoto(file,sid){const c=await compressImg(file);const p=`${sid}/${Date.now()}.jpg`;const r=await fetch(`${SB}/storage/v1/object/site-photos/${p}`,{method:"POST",headers:{"apikey":SK,"Authorization":`Bearer ${SK}`,"Content-Type":"image/jpeg"},body:c});if(!r.ok)throw new Error("fail");return`${SB}/storage/v1/object/public/site-photos/${p}`;}
-async function delPhoto(url){const p=url.split('/site-photos/')[1];await fetch(`${SB}/storage/v1/object/site-photos/${p}`,{method:"DELETE",headers:{"apikey":SK,"Authorization":`Bearer ${SK}`}});}
+async function upPhoto(file,sid){const c=await compressImg(file);const form=new FormData();form.append("photo",c,file.name||"photo.jpg");const r=await fetch(`${API}/uploads/site-photos/${sid}`,{method:"POST",credentials:"include",body:form});if(!r.ok)throw new Error("fail");return(await r.json()).url;}
+async function delPhoto(url){const name=url.split('/').pop();const r=await fetch(`${API}/uploads/site-photos/${encodeURIComponent(name)}`,{method:"DELETE",credentials:"include"});if(!r.ok&&r.status!==404)throw new Error("fail");}
 
 // Geolocation hook
 function useGeo(){const[p,setP]=useState(null);const w=useRef(null);
@@ -88,7 +86,6 @@ const ls={
 const getFavs=()=>ls.json("drv_favs")||[];
 const setFavs=f=>ls.set("drv_favs",JSON.stringify(f));
 const togFav=id=>{const f=getFavs();f.includes(id)?setFavs(f.filter(x=>x!==id)):setFavs([...f,id]);};
-const checkSession=()=>{const d=ls.get("drv_date");if(!d)return true;return(Date.now()-parseInt(d))/(1e3*60*60*24)<SDAYS;};
 const touchSession=()=>ls.set("drv_date",Date.now().toString());
 
 // ============================================================
@@ -98,11 +95,12 @@ const IDB_NAME="drv_offline";const IDB_VER=1;
 const idbOpen=()=>new Promise((res,rej)=>{const r=indexedDB.open(IDB_NAME,IDB_VER);r.onupgradeneeded=e=>{const db=e.target.result;if(!db.objectStoreNames.contains("cache"))db.createObjectStore("cache");if(!db.objectStoreNames.contains("queue"))db.createObjectStore("queue",{keyPath:"id",autoIncrement:true});};r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error);});
 const idbGet=async(store,key)=>{try{const db=await idbOpen();return new Promise((res)=>{const tx=db.transaction(store,"readonly");const s=tx.objectStore(store);const r=s.get(key);r.onsuccess=()=>res(r.result??null);r.onerror=()=>res(null);});}catch(e){return null;}};
 const idbSet=async(store,key,val)=>{try{const db=await idbOpen();const tx=db.transaction(store,"readwrite");tx.objectStore(store).put(val,key);return new Promise(res=>{tx.oncomplete=()=>res(true);tx.onerror=()=>res(false);});}catch(e){return false;}};
+const idbAdd=async(store,val)=>{try{const db=await idbOpen();const tx=db.transaction(store,"readwrite");tx.objectStore(store).add(val);return new Promise(res=>{tx.oncomplete=()=>res(true);tx.onerror=()=>res(false);tx.onabort=()=>res(false);});}catch(e){return false;}};
 const idbDel=async(store,key)=>{try{const db=await idbOpen();const tx=db.transaction(store,"readwrite");tx.objectStore(store).delete(key);return new Promise(res=>{tx.oncomplete=()=>res(true);});}catch(e){return false;}};
 const idbGetAll=async(store)=>{try{const db=await idbOpen();return new Promise((res)=>{const tx=db.transaction(store,"readonly");const r=tx.objectStore(store).getAll();r.onsuccess=()=>res(r.result||[]);r.onerror=()=>res([]);});}catch(e){return[];}};
 
 // Offline write queue — stores pending writes when offline
-const queueWrite=async(action)=>{await idbSet("queue","q_"+Date.now(),action);};
+const queueWrite=async(action)=>{if(!await idbAdd("queue",action))throw new Error("Impossible d'enregistrer l'action hors-ligne");};
 const processQueue=async()=>{try{const items=await idbGetAll("queue");if(items.length===0)return 0;const db=await idbOpen();let processed=0;for(const item of items){try{if(item.type==="comment"){await dbPost("notes",item.data);}else if(item.type==="visit"){await dbPost("visits",item.data);}else if(item.type==="activity"){await dbPost("activity_log",item.data);}
 const tx=db.transaction("queue","readwrite");tx.objectStore("queue").delete(item.id);await new Promise(r=>{tx.oncomplete=r;});processed++;}catch(e){break;}}return processed;}catch(e){return 0;}};
 
@@ -113,10 +111,6 @@ const logAct=async(sid,tech,action,details="")=>{try{await dbPost("activity_log"
 // Format activity for display
 const ACT_CFG={edit:{label:"Modif.",color:"#1565C0",bg:"#E3F2FD",dot:"#42A5F5"},comment:{label:"Note",color:"#2E7D32",bg:"#E8F5E9",dot:"#66BB6A"},photo:{label:"Photo",color:"#7B1FA2",bg:"#F3E5F5",dot:"#AB47BC"},create:{label:"Nouveau",color:"#E65100",bg:"#FFF3E0",dot:"#FF9800"}};
 const parseActFields=(detail)=>{try{const d=JSON.parse(detail);const m={lat:"GPS",lng:null,address:"Adresse",needs_4x4:"4x4",needs_terrasse:"Terrasse",needs_binome:"Binôme",technologies:"Techno",name:"Nom",type:"Type",code_nidt:"NIDT",access_key:"Clé accès",anfr_support_id:"ANFR",poi_category:"Catégorie",has_wc:"WC",has_abloy:"Chargeur Abloy"};const p=[];for(const k of Object.keys(d)){if(m[k]!==undefined&&m[k]!==null)p.push(m[k]);}return p.length>0?p:["Infos"];}catch{return null;}};
-
-// PIN hashing (SHA-256)
-async function hashPin(pin){const enc=new TextEncoder().encode(pin);const buf=await crypto.subtle.digest("SHA-256",enc);return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");}
-const isHashed=v=>typeof v==="string"&&/^[a-f0-9]{64}$/.test(v);
 
 // ============================================================
 // LOGO
@@ -539,48 +533,50 @@ function SiteIcon({type,size=48}){
 // ============================================================
 export default function App(){
   const[auth,setAuth]=useState(null); // {code,role,name}
+  const[checkingSession,setCheckingSession]=useState(true);
   const[page,setPage]=useState("home"); // home|site|editGps|admin|notes|notebook|section|note|directory|game|td|bacteria|myactivity
   const[authStep,setAuthStep]=useState("code"); // code|pin|setup_pin
   const[prefetchedData,setPrefetchedData]=useState(null);
   const[darkMode,setDarkMode]=useState(()=>{try{return localStorage.getItem("drv_dark")==="1";}catch{return false;}});
   useEffect(()=>{try{localStorage.setItem("drv_dark",darkMode?"1":"0");}catch{}},[darkMode]);
 
-  // Restore session + prefetch
+  // Restore the server-side session + prefetch initial data.
   useEffect(()=>{
-    const saved=ls.json("drv_auth");
-    if(saved&&checkSession()){
-      setAuth(saved);touchSession();
-      Promise.all([
+    (async()=>{try{
+      const response=await fetch(`${API}/auth/session`,{credentials:"include"});
+      if(!response.ok)throw new Error("no session");
+      const{tech}=await response.json();setAuth(tech);ls.set("drv_auth",JSON.stringify(tech));touchSession();
+      const[sites,stData,techs]=await Promise.all([
         dbGet("sites","order=name.asc").catch(()=>null),
-        fetch(`${SB}/functions/v1/fuel-prices?deps=67,68`,{headers:{"apikey":SK,"Authorization":`Bearer ${SK}`}}).then(r=>r.ok?r.json():null).catch(()=>null),
+        fetch(`${FUEL_API_URL}?deps=67,68`,{credentials:"include"}).then(r=>r.ok?r.json():null).catch(()=>null),
         dbGet("technicians","select=code,name,avatar_url").catch(()=>null),
-      ]).then(([sites,stData,techs])=>{setPrefetchedData({sites,stData,techs});});
-    }
-    else if(saved){ls.del("drv_auth");ls.del("drv_date");}
+      ]);
+      setPrefetchedData({sites,stData,techs});
+    }catch(e){ls.del("drv_auth");ls.del("drv_date");setAuth(null);}finally{setCheckingSession(false);}})();
   },[]);
 
   const handleLogin=async(code)=>{
     try{
-      const r=await dbGet("technicians",`code=eq.${code}&select=*`);
-      if(r.length===0){await dbPost("login_logs",{technician_code:code,success:false});return{error:"Code inconnu"};}
-      const tech=r[0];
-      if(tech.active===false)return{error:"Compte désactivé"};
-      // Update last_login
-      try{await dbPatch("technicians",{last_login:new Date().toISOString()},`code=eq.${code}`);}catch(e){}
-      await dbPost("login_logs",{technician_code:code,success:true});
-      if(!tech.pin)return{needPin:true,tech};
-      return{tech};
+      const r=await fetch(`${API}/auth/identify`,{method:"POST",headers:{"Content-Type":"application/json"},credentials:"include",body:JSON.stringify({code})});
+      const data=await r.json();if(!r.ok)return{error:data.error||"Erreur de connexion"};return data;
     }catch(e){return{error:"Erreur de connexion"};}
   };
+
+  const handlePinLogin=async(code,pin)=>{try{
+    const r=await fetch(`${API}/auth/login`,{method:"POST",headers:{"Content-Type":"application/json"},credentials:"include",body:JSON.stringify({code,pin})});
+    const data=await r.json();if(!r.ok)return{error:data.error||"PIN incorrect"};return data;
+  }catch(e){return{error:"Erreur de connexion"};}};
 
   const handleAuth=(tech)=>{
     const a={code:tech.code,role:tech.role||"tech",name:tech.name||"",avatar_url:tech.avatar_url||""};
     setAuth(a);ls.set("drv_auth",JSON.stringify(a));touchSession();
   };
 
-  const logout=()=>{ls.del("drv_auth");ls.del("drv_date");setAuth(null);setPage("home");};
+  const logout=()=>{fetch(`${API}/auth/logout`,{method:"POST",credentials:"include"}).catch(()=>{});ls.del("drv_auth");ls.del("drv_date");setAuth(null);setPage("home");};
 
-  if(!auth)return<div style={S.ctr}><Styles/><AuthScreen onLogin={handleLogin} onAuth={handleAuth}/><GlobalConfirmHost/></div>;
+  if(checkingSession)return<div style={S.ctr}><Styles/><div style={S.loginW}><div style={S.loginB}><div style={{display:"flex",justifyContent:"center",marginBottom:20}}><Logo s={1.1}/></div><div style={{...S.spin,margin:"0 auto"}}/></div></div></div>;
+
+  if(!auth)return<div style={S.ctr}><Styles/><AuthScreen onLogin={handleLogin} onPinLogin={handlePinLogin} onAuth={handleAuth}/><GlobalConfirmHost/></div>;
 
   if(page==="admin"&&auth.role==="admin")return<div style={S.ctr}><Styles/>{darkMode&&<DarkOverlay/>}<AdminPanel auth={auth} onBack={()=>setPage("home")} logout={logout}/><GlobalConfirmHost/></div>;
 
@@ -590,8 +586,8 @@ export default function App(){
 // ============================================================
 // AUTH SCREEN - Code + PIN
 // ============================================================
-function AuthScreen({onLogin,onAuth}){
-  const[step,setStep]=useState("code"); // code|pin|setup
+function AuthScreen({onLogin,onPinLogin,onAuth}){
+  const[step,setStep]=useState("code"); // code|pin
   const[code,setCode]=useState("");
   const[pin,setPin]=useState("");
   const[tech,setTech]=useState(null);
@@ -607,35 +603,13 @@ function AuthScreen({onLogin,onAuth}){
     const res=await onLogin(c);setBusy(false);
     if(res.error)return setErr(res.error);
     setTech(res.tech);
-    if(res.needPin){setStep("setup");return;}
-    // Has PIN — check cached hash
-    const cached=ls.get(`drv_pin_${c}`);
-    if(cached&&cached===res.tech.pin){onAuth(res.tech);return;}
     setStep("pin");
   };
 
   const submitPin=async()=>{
     if(pin.length!==4)return setErr("4 chiffres requis");
-    const h=await hashPin(pin);
-    // Support both hashed and legacy plain PINs
-    if(isHashed(tech.pin)?h!==tech.pin:pin!==tech.pin){setErr("PIN incorrect");setPin("");return;}
-    // Migrate plain PIN to hashed on successful login
-    if(!isHashed(tech.pin)){try{await dbPatch("technicians",{pin:h},`code=eq.${tech.code}`);}catch(e){}}
-    ls.set(`drv_pin_${tech.code}`,h);
-    onAuth(tech);
-  };
-
-  const setupPin=async()=>{
-    if(pin.length!==4)return setErr("4 chiffres requis");
-    setBusy(true);
-    try{
-      const h=await hashPin(pin);
-      await dbPatch("technicians",{pin:h},`code=eq.${tech.code}`);
-      ls.set(`drv_pin_${tech.code}`,h);
-      tech.pin=h;
-      onAuth(tech);
-    }catch(e){setErr("Erreur");}
-    setBusy(false);
+    setBusy(true);setErr("");const res=await onPinLogin(tech.code,pin);setBusy(false);
+    if(res.error){setErr(res.error);setPin("");return;}onAuth(res.tech);
   };
 
   return(
@@ -652,16 +626,8 @@ function AuthScreen({onLogin,onAuth}){
         <p style={{textAlign:"center",color:"#999",fontSize:13,margin:"0 0 16px"}}>Entrez votre PIN</p>
         {err&&<div style={S.errB}>{err}</div>}
         <input ref={ref} type="password" inputMode="numeric" value={pin} onChange={e=>setPin(e.target.value.replace(/\D/g,"").slice(0,4))} onKeyDown={e=>e.key==="Enter"&&submitPin()} placeholder="● ● ● ●" maxLength={4} style={{...S.codeIn,letterSpacing:16,fontSize:28}}/>
-        <button style={{...S.subBtn,marginTop:16}} onClick={submitPin}>Valider</button>
+        <button style={{...S.subBtn,marginTop:16,opacity:busy?.6:1}} onClick={submitPin} disabled={busy}>{busy?"...":"Valider"}</button>
         <button style={S.linkBtn} onClick={()=>{setStep("code");setCode("");setPin("");setErr("");}}>Changer de compte</button>
-      </>}
-
-      {step==="setup"&&<>
-        <p style={{textAlign:"center",color:"#4ECDC4",fontSize:13,margin:"0 0 4px",fontWeight:700}}>Première connexion</p>
-        <p style={{textAlign:"center",color:"#999",fontSize:12,margin:"0 0 16px"}}>Choisissez un PIN à 4 chiffres</p>
-        {err&&<div style={S.errB}>{err}</div>}
-        <input ref={ref} type="password" inputMode="numeric" value={pin} onChange={e=>setPin(e.target.value.replace(/\D/g,"").slice(0,4))} onKeyDown={e=>e.key==="Enter"&&setupPin()} placeholder="● ● ● ●" maxLength={4} style={{...S.codeIn,letterSpacing:16,fontSize:28}}/>
-        <button style={{...S.subBtn,marginTop:16,opacity:busy?.6:1}} onClick={setupPin} disabled={busy}>Créer mon PIN</button>
       </>}
       <p style={{textAlign:"center",color:"rgba(255,255,255,.15)",fontSize:10,marginTop:20}}>v{APP_VERSION}</p>
     </div></div>
@@ -739,11 +705,10 @@ function MainApp({auth,setAuth,page,setPage,logout,prefetchedData,darkMode,setDa
   const uploadAvatar=async(file)=>{
     try{
       const c=await compressImg(file,400);
-      const path=`avatars/${auth.code}_${Date.now()}.jpg`;
-      const r=await fetch(`${SB}/storage/v1/object/site-photos/${path}`,{method:"POST",headers:{"apikey":SK,"Authorization":`Bearer ${SK}`,"Content-Type":"image/jpeg"},body:c});
+      const form=new FormData();form.append("photo",c,file.name||"avatar.jpg");
+      const r=await fetch(`${API}/uploads/avatar`,{method:"POST",credentials:"include",body:form});
       if(!r.ok)throw new Error("Upload failed");
-      const url=`${SB}/storage/v1/object/public/site-photos/${path}`;
-      await dbPatch("technicians",{avatar_url:url},`code=eq.${auth.code}`);
+      const{url}=await r.json();
       const newAuth={...auth,avatar_url:url};
       setAuth(newAuth);ls.set("drv_auth",JSON.stringify(newAuth));
       setTechAvatars(prev=>({...prev,[auth.code]:{url,name:auth.name||auth.code}}));
@@ -788,13 +753,13 @@ try{const synced=await processQueue();if(synced>0)flash(`${synced} action${synce
 try{const idbC=await idbGet("cache","sites");if(idbC&&idbC.length>0){setSites(idbC);flash("Mode hors-ligne (IDB)");return;}}catch(e2){}
 const c=ls.json("drv_cache");if(c){setSites(c);flash("Mode hors-ligne");}else flash("Erreur");}setLoading(false);};
 
-  // Fetch fuel stations via Supabase Edge Function (proxy CORS + marques OSM)
+  // Fetch fuel stations through the VPS API (the upstream key stays server-side).
   const fetchStations=async()=>{
     const cached=ls.json("drv_stations");const cachedTs=ls.get("drv_stations_ts");
     if(cached&&cached.length>0&&cachedTs&&(Date.now()-parseInt(cachedTs))<900000){setStations(cached);return;} // 15min cache
     setStationsLoading(true);
     try{
-      const r=await fetch(`${SB}/functions/v1/fuel-prices?deps=67,68`,{headers:{"apikey":SK,"Authorization":`Bearer ${SK}`}});
+      const r=await fetch(`${FUEL_API_URL}?deps=67,68`,{credentials:"include"});
       if(!r.ok)throw new Error(`Edge fn ${r.status}`);
       const d=await r.json();
       if(d.error)throw new Error(d.error);
@@ -1477,7 +1442,7 @@ function DuplicatesPanel({sites,reload,flash,auth}){
       await dbPatch("sites",updates,`id=eq.${selPair.a.id}`);
       // Transfer related records from B to A
       try{await dbPatch("visits",{site_id:selPair.a.id},`site_id=eq.${selPair.b.id}`);}catch(e){}
-      try{await dbPatch("comments",{site_id:selPair.a.id},`site_id=eq.${selPair.b.id}`);}catch(e){}
+      try{await dbPatch("notes",{site_id:selPair.a.id},`site_id=eq.${selPair.b.id}`);}catch(e){}
       try{await dbPatch("photos",{site_id:selPair.a.id},`site_id=eq.${selPair.b.id}`);}catch(e){}
       try{await dbPatch("ratings",{site_id:selPair.a.id},`site_id=eq.${selPair.b.id}`);}catch(e){}
       // Soft-delete B (goes to trash)
@@ -1756,12 +1721,11 @@ function StatsPanel({sites,visits,activity,techs}){
     return activity.filter(a=>auditFilter==="all"||a.action===auditFilter);
   },[activity,auditFilter]);
 
-  // Cost estimate — Supabase free tier: 500MB DB, 50k MAU, 2GB bandwidth
-  // Pro tier: $25/month. Estimation based on req count
+  // Approximate API traffic generated by this browser.
   const estReqMonth=apiStats.month;
   const estDataPerReq=2; // ~2KB per request on average
   const estBandwidthMB=(estReqMonth*estDataPerReq)/1024;
-  const estCost=estBandwidthMB<2048?0:Math.max(0,((estBandwidthMB-2048)/1024)*0.09);
+  const estCost=0;
 
   return<>
     {/* TOP 10 SITES (Feature 78) */}
@@ -1812,17 +1776,17 @@ function StatsPanel({sites,visits,activity,techs}){
           <div style={{height:"100%",borderRadius:3,background:estBandwidthMB>2048?"#E65100":estBandwidthMB>1500?"#FF9800":"#4CAF50",width:`${Math.min(100,(estBandwidthMB/2048)*100)}%`,transition:"width .5s"}}/>
         </div>
         <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:"#999"}}>
-          <span>0 MB</span><span>Limite gratuite: 2 GB</span>
+          <span>0 MB</span><span>Trafic mensuel estimé</span>
         </div>
       </div>
       <div style={{background:estCost>0?"#FFEBEE":"#E8F5E9",borderRadius:10,padding:"10px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <div>
           <div style={{fontSize:11,fontWeight:600,color:"#666"}}>Coût mensuel estimé</div>
-          <div style={{fontSize:8,color:"#BBB"}}>Plan Supabase {estCost>0?"Pro":"Free tier"}</div>
+          <div style={{fontSize:8,color:"#BBB"}}>Inclus dans le VPS</div>
         </div>
         <div style={{fontSize:22,fontWeight:900,color:estCost>0?"#D32F2F":"#2E7D32"}}>{estCost.toFixed(2)}€</div>
       </div>
-      <p style={{fontSize:9,color:"#BBB",marginTop:6,lineHeight:1.4,textAlign:"center"}}>Estimation basée sur le compteur local. Consulte le dashboard Supabase pour les chiffres exacts.</p>
+      <p style={{fontSize:9,color:"#BBB",marginTop:6,lineHeight:1.4,textAlign:"center"}}>Estimation locale indicative. Les métriques serveur seront ajoutées au tableau de bord VPS.</p>
     </Card>
 
     {/* AUDIT TRAIL (Feature 87) */}
@@ -1861,7 +1825,7 @@ function StatsPanel({sites,visits,activity,techs}){
 }
 
 // ============================================================
-// BLOBERIE GAME — Agar.io-like with bots + realtime multi via Supabase
+// BLOBERIE GAME — Agar.io-like with bots + PostgreSQL multiplayer sync
 // ============================================================
 
 const BLOB_NAMES=[
@@ -1888,13 +1852,12 @@ function BloberieGame({setPage,auth,flash}){
   const[session,setSession]=useState(null); // {id, code, host_code, status}
   const[lobbyPlayers,setLobbyPlayers]=useState([]);
   const[loading,setLoading]=useState(false);
-  const channelRef=useRef(null);
   const pollRef=useRef(null);
   const nameRef=useRef(null);
   nameRef.current=auth.name||auth.code;
 
-  // Cleanup channel on unmount
-  useEffect(()=>()=>{if(channelRef.current){channelRef.current.unsubscribe?.();channelRef.current=null;}if(pollRef.current){clearInterval(pollRef.current);pollRef.current=null;}},[]);
+  // Cleanup polling on unmount
+  useEffect(()=>()=>{if(pollRef.current){clearInterval(pollRef.current);pollRef.current=null;}},[]);
 
   const genCode=()=>{const L="ABCDEFGHJKMNPQRSTUVWXYZ";return Array.from({length:4},()=>L[Math.floor(Math.random()*L.length)]).join("");};
 
@@ -2173,7 +2136,7 @@ function BloberieGame({setPage,auth,flash}){
 }
 
 // ============================================================
-// BLOBERIE ARENA — Canvas game loop with realtime sync
+// BLOBERIE ARENA — Canvas game loop with PostgreSQL polling sync
 // ============================================================
 function BloberieArena({session,auth,color,withBots,weapons,onQuit,onDeath,flash}){
   const canvasRef=useRef(null);
@@ -2201,7 +2164,6 @@ function BloberieArena({session,auth,color,withBots,weapons,onQuit,onDeath,flash
   const[toastMsg,setToastMsg]=useState(null);
   const[currentWeaponIdx,setCurrentWeaponIdx]=useState(0);
   const[shootCooldown,setShootCooldown]=useState(0); // 0-1 for UI
-  const channelRef=useRef(null);
   const broadcastRef=useRef(0);
   const sessionIdRef=useRef(session.id);
   const authCodeRef=useRef(auth.code);
@@ -2331,57 +2293,8 @@ function BloberieArena({session,auth,color,withBots,weapons,onQuit,onDeath,flash
   // eslint-disable-next-line
   },[]);
 
-  // ==== REALTIME SYNC ====
-  const startRealtime=()=>{
-    try{
-      if(!window.supabase){
-        // Fallback: use raw WebSocket via Supabase Realtime REST
-        // For now we use simple polling fallback
-        startPollingFallback();
-        return;
-      }
-      const channel=window.supabase.channel(`game:${sessionIdRef.current}`,{config:{broadcast:{self:false}}});
-      channel.on("broadcast",{event:"move"},({payload})=>{
-        if(payload.code===authCodeRef.current)return;
-        const o=stateRef.current.others[payload.code]||{};
-        stateRef.current.others[payload.code]={...o,...payload,lastSeen:Date.now()};
-      });
-      channel.on("broadcast",{event:"kill"},({payload})=>{
-        const st=stateRef.current;
-        if(payload.victim===authCodeRef.current&&st.player?.alive){
-          st.player.alive=false;
-          st.lastKiller=payload.killerName;
-          setTimeout(onDeath,300);
-        }
-        if(payload.killer===authCodeRef.current){
-          setToastMsg(`+${payload.gain} Mangé : ${payload.victimName}`);
-          setTimeout(()=>setToastMsg(null),2000);
-        }
-      });
-      channel.on("broadcast",{event:"shot"},({payload})=>{
-        if(payload.ownerCode===authCodeRef.current)return;
-        stateRef.current.projectiles.push({
-          x:payload.x,y:payload.y,
-          vx:payload.vx,vy:payload.vy,
-          ttl:payload.ttl||1.0,
-          ownerCode:payload.ownerCode,
-          ownerName:payload.ownerName,
-          color:payload.color,
-          damage:payload.damage||4,
-          explosive:!!payload.explosive,
-          explosionRadius:payload.explosionRadius||0,
-        });
-      });
-      channel.subscribe();
-      channelRef.current=channel;
-      // Broadcast my position 10 Hz
-      broadcastRef.current=setInterval(()=>{
-        const p=stateRef.current.player;
-        if(!p||!p.alive)return;
-        channel.send({type:"broadcast",event:"move",payload:{code:authCodeRef.current,name:p.name,color:p.color,x:Math.round(p.x),y:Math.round(p.y),mass:Math.floor(p.mass),alive:p.alive}});
-      },100);
-    }catch(e){startPollingFallback();}
-  };
+  // Multiplayer positions are synchronized through the local API and PostgreSQL.
+  const startRealtime=()=>startPollingFallback();
 
   const startPollingFallback=()=>{
     // Fallback: poll game_players table every 500ms
@@ -2406,15 +2319,9 @@ function BloberieArena({session,auth,color,withBots,weapons,onQuit,onDeath,flash
 
   const stopRealtime=()=>{
     if(broadcastRef.current){clearInterval(broadcastRef.current);broadcastRef.current=0;}
-    if(channelRef.current){try{channelRef.current.unsubscribe?.();}catch(e){}channelRef.current=null;}
   };
 
-  const broadcastKill=(victim,victimName,gain)=>{
-    const payload={killer:authCodeRef.current,killerName:stateRef.current.player.name,victim,victimName,gain};
-    if(channelRef.current){
-      try{channelRef.current.send({type:"broadcast",event:"kill",payload});}catch(e){}
-    }
-  };
+  const broadcastKill=()=>{};
 
   // ==== UPDATE LOOP ====
   const update=(dt)=>{
@@ -2463,10 +2370,6 @@ function BloberieArena({session,auth,color,withBots,weapons,onQuit,onDeath,flash
             weaponId:w.id,
           };
           st.projectiles.push(proj);
-          // Broadcast shot
-          if(channelRef.current){
-            try{channelRef.current.send({type:"broadcast",event:"shot",payload:{ownerCode:authCodeRef.current,ownerName:p.name,color:w.color,x:proj.x,y:proj.y,vx:proj.vx,vy:proj.vy,ttl:w.ttl,damage:w.damage,explosive:!!w.explosive,explosionRadius:w.explosionRadius||0,weaponId:w.id}});}catch(e){}
-          }
         }
       }
     }
@@ -3751,7 +3654,6 @@ function DriveTDArena({session,mode,auth,onQuit,onGameOver,onVictory,flash}){
   const[toastMsg,setToastMsg]=useState(null);
   const[spellCds,setSpellCds]=useState({meteor:1,gold:1,time:1});
   const[targetingSpell,setTargetingSpell]=useState(null);
-  const channelRef=useRef(null);
   const towerIdRef=useRef(1);
   const enemyIdRef=useRef(1);
 
@@ -3783,36 +3685,9 @@ function DriveTDArena({session,mode,auth,onQuit,onGameOver,onVictory,flash}){
     return minD;
   };
 
-  // ==== MULTI BROADCAST ====
-  useEffect(()=>{
-    if(mode!=="coop"||!session||session.solo)return;
-    if(!window.supabase)return;
-    const chan=window.supabase.channel(`td:${session.id}`,{config:{broadcast:{self:false}}});
-    chan.on("broadcast",{event:"build"},({payload})=>{
-      if(payload.player===auth.code)return;
-      stateRef.current.towers.push({id:payload.towerId,type:payload.type,x:payload.x,y:payload.y,level:0,branch:null,lastShot:0,goldAt:Date.now(),healAt:Date.now(),kills:0,ownerCode:payload.player});
-    });
-    chan.on("broadcast",{event:"upgrade"},({payload})=>{
-      if(payload.player===auth.code)return;
-      const t=stateRef.current.towers.find(x=>x.id===payload.towerId);
-      if(t){t.level=payload.level;if(payload.branch)t.branch=payload.branch;}
-    });
-    chan.on("broadcast",{event:"sell"},({payload})=>{
-      if(payload.player===auth.code)return;
-      const idx=stateRef.current.towers.findIndex(x=>x.id===payload.towerId);
-      if(idx>=0)stateRef.current.towers.splice(idx,1);
-    });
-    chan.on("broadcast",{event:"gold"},({payload})=>{stateRef.current.gold=payload.gold;setGold(payload.gold);});
-    chan.on("broadcast",{event:"startwave"},()=>{startWave();});
-    chan.subscribe();
-    channelRef.current=chan;
-    return()=>{try{chan.unsubscribe();}catch(e){}channelRef.current=null;};
-  // eslint-disable-next-line
-  },[mode,session?.id,auth.code]);
-
-  const broadcast=(event,payload)=>{
-    if(channelRef.current)try{channelRef.current.send({type:"broadcast",event,payload});}catch(e){}
-  };
+  // The shared session remains stored in PostgreSQL. Event synchronization can
+  // be extended server-side without exposing a third-party realtime client.
+  const broadcast=()=>{};
 
   // Stats calculator
   const computeStats=(t)=>{
@@ -4925,7 +4800,7 @@ function SiteHistorySection({siteId,techs}){
 
 // ============================================================
 // DRIVE BACTERIA — 8x8 board, duplicate/jump + convert
-// Solo vs IA (3 levels) + Multi 1v1 via Supabase Realtime
+// Solo vs IA (3 levels) + Multi 1v1 synchronized through PostgreSQL
 // ============================================================
 const BACT_SIZE=8;
 const BACT_OBSTACLES=[[3,3],[3,4],[4,3],[4,4]]; // central blockers
@@ -5299,7 +5174,6 @@ function DriveBacteriaArena({session,mode,aiLevel,auth,onQuit,onBack,flash}){
   const[anim,setAnim]=useState({converting:[],placing:null,from:null}); // for cascade animation
   const[aiThinking,setAIThinking]=useState(false);
   const[soundsOn,setSoundsOn]=useState(true);
-  const channelRef=useRef(null);
   const lastSyncedMoveRef=useRef(session.move_count||0);
 
   // Determine my color
@@ -5311,32 +5185,12 @@ function DriveBacteriaArena({session,mode,aiLevel,auth,onQuit,onBack,flash}){
 
   const playSound=(s)=>{if(soundsOn&&bactSounds[s])bactSounds[s]();};
 
-  // ==== MULTI: Realtime sync via DB polling (works without supabase-js) ====
+  // ==== MULTI: sync via PostgreSQL polling ====
   const pollIntervalRef=useRef(null);
   useEffect(()=>{
     if(mode!=="coop"||!session||session.solo)return;
     let cancelled=false;
-    // Try realtime broadcast first if supabase JS client exists
-    if(window.supabase){
-      try{
-        const chan=window.supabase.channel(`bact:${session.id}`,{config:{broadcast:{self:false}}});
-        chan.on("broadcast",{event:"move"},({payload})=>{
-          if(payload.player===auth.code)return;
-          if(payload.moveCount<=lastSyncedMoveRef.current)return;
-          lastSyncedMoveRef.current=payload.moveCount;
-          if(payload.skipped){
-            setBoard(JSON.parse(payload.board));
-            setTurn(payload.turn);
-            setMoveCount(payload.moveCount);
-          }else{
-            animateMove(payload.fromR,payload.fromC,payload.toR,payload.toC,JSON.parse(payload.board),payload.turn,payload.moveCount);
-          }
-        });
-        chan.subscribe();
-        channelRef.current=chan;
-      }catch(e){console.warn("Realtime fail, fallback to polling",e);}
-    }
-    // Always also run DB polling as primary (most reliable for turn-based)
+    // PostgreSQL is the single source of truth for turn-based synchronization.
     const poll=async()=>{
       if(cancelled)return;
       try{
@@ -5364,8 +5218,6 @@ function DriveBacteriaArena({session,mode,aiLevel,auth,onQuit,onBack,flash}){
     return()=>{
       cancelled=true;
       if(pollIntervalRef.current){clearInterval(pollIntervalRef.current);pollIntervalRef.current=null;}
-      try{if(channelRef.current)channelRef.current.unsubscribe();}catch(e){}
-      channelRef.current=null;
     };
   // eslint-disable-next-line
   },[mode,session?.id,auth.code]);
@@ -5373,13 +5225,6 @@ function DriveBacteriaArena({session,mode,aiLevel,auth,onQuit,onBack,flash}){
   const broadcastMove=(fromR,fromC,toR,toC,newBoard,newTurn,newMoveCount,skipped=false)=>{
     // Persist to DB (primary sync)
     dbPatch("bacteria_sessions",{board:JSON.stringify(newBoard),turn:newTurn,move_count:newMoveCount},`id=eq.${session.id}`).catch(()=>{});
-    // Also broadcast for instant feedback if available
-    if(channelRef.current){
-      try{channelRef.current.send({type:"broadcast",event:"move",payload:{
-        player:auth.code,fromR,fromC,toR,toC,skipped,
-        board:JSON.stringify(newBoard),turn:newTurn,moveCount:newMoveCount,
-      }});}catch(e){}
-    }
   };
 
   const animateMove=(fromR,fromC,toR,toC,finalBoard,newTurn,newMoveCount)=>{
@@ -6627,20 +6472,20 @@ function HealthPanel({sites,techs}){
   // API health check (#191)
   const runHealthChecks=async()=>{
     setChecking(true);const results={};const timings={};
-    // Supabase
+    // DRIVE API + PostgreSQL
     try{
       const t0=performance.now();
-      const r=await fetch(`${SB}/rest/v1/sites?select=id&limit=1`,{headers:{...H,Accept:"application/json"}});
-      timings.supabase=Math.round(performance.now()-t0);
-      results.supabase=r.ok?"ok":"error";
-    }catch(e){results.supabase="offline";timings.supabase=null;}
-    // Edge Function
+      const r=await fetch("/health");
+      timings.database=Math.round(performance.now()-t0);
+      results.database=r.ok?"ok":"error";
+    }catch(e){results.database="offline";timings.database=null;}
+    // Fuel service
     try{
       const t0=performance.now();
-      const r=await fetch(`${SB}/functions/v1/fuel-prices?deps=67`,{headers:{"apikey":SK,"Authorization":`Bearer ${SK}`}});
-      timings.edge_fn=Math.round(performance.now()-t0);
-      results.edge_fn=r.ok?"ok":"error";
-    }catch(e){results.edge_fn="offline";timings.edge_fn=null;}
+      const r=await fetch(`${FUEL_API_URL}?deps=67`,{credentials:"include"});
+      timings.fuel=Math.round(performance.now()-t0);
+      results.fuel=r.ok?"ok":"error";
+    }catch(e){results.fuel="offline";timings.fuel=null;}
     // Open-Meteo
     try{
       const t0=performance.now();
@@ -6669,7 +6514,7 @@ function HealthPanel({sites,techs}){
       <h3 style={S.sec}><I.Act/> Santé des APIs</h3>
       <button onClick={runHealthChecks} disabled={checking} style={{...S.subBtn,width:"100%",marginBottom:12,opacity:checking?.6:1}}>{checking?<><div style={S.spin}/> Test en cours...</>:<><I.Ref/> Lancer le diagnostic</>}</button>
       {Object.keys(checks).length>0&&<div style={{display:"flex",flexDirection:"column",gap:6}}>
-        {[["supabase","Supabase (BDD)"],["edge_fn","Edge Function (Carburant)"],["meteo","Open-Meteo (Météo)"],["nominatim","Nominatim (Géocodage)"]].map(([k,label])=>
+        {[["database","DRIVE API + PostgreSQL"],["fuel","Service carburants"],["meteo","Open-Meteo (Météo)"],["nominatim","Nominatim (Géocodage)"]].map(([k,label])=>
           <div key={k} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",borderRadius:10,background:checks[k]==="ok"?"#E8F8F5":"#FFF5F5",border:`1px solid ${checks[k]==="ok"?"#B2DFDB":"#FFCDD2"}`}}>
             <span style={{fontSize:18}}>{statusIcon(checks[k])}</span>
             <div style={{flex:1}}>
@@ -6686,7 +6531,7 @@ function HealthPanel({sites,techs}){
     {Object.keys(perf).length>0&&<Card>
       <h3 style={S.sec}><I.Bar/> Latence APIs</h3>
       <div style={{display:"flex",alignItems:"flex-end",gap:8,height:100}}>
-        {[["supabase","Supabase"],["edge_fn","Edge Fn"],["meteo","Météo"],["nominatim","Géocode"]].map(([k,l])=>{
+        {[["database","DRIVE"],["fuel","Carburant"],["meteo","Météo"],["nominatim","Géocode"]].map(([k,l])=>{
           const ms=perf[k]||0;const maxMs=Math.max(...Object.values(perf).filter(v=>v!=null),100);
           const pct=maxMs>0?ms/maxMs*80:0;
           const color=ms<200?"#1B8A6B":ms<500?"#E67E22":"#E74C3C";
@@ -6734,15 +6579,7 @@ function BackupPanel(){
   const loadCounts=async()=>{
     const c={};
     for(const t of BACKUP_TABLES){
-      try{const r=await dbGet(t,"select=id&limit=1&order=id.desc");c[t]=r.length>0?"✓":"vide";}catch(e){c[t]="?";}
-    }
-    // Get actual counts
-    for(const t of BACKUP_TABLES){
-      try{
-        const r=await fetch(`${SB}/rest/v1/${t}?select=id`,{headers:{...H,Accept:"application/json",Prefer:"count=exact","Range":"0-0"}});
-        const ct=r.headers.get("content-range");
-        if(ct){const m=ct.match(/\/(\d+)/);if(m)c[t]=parseInt(m[1]);}
-      }catch(e){}
+      try{const r=await dbGet(t,"select=id&limit=10000");c[t]=r.length;}catch(e){c[t]="?";}
     }
     setCounts(c);
   };
@@ -6755,7 +6592,7 @@ function BackupPanel(){
       for(const t of BACKUP_TABLES){
         setStatus(`Export ${t}...`);
         try{
-          // Paginate to get all records (Supabase returns max 1000 per request)
+          // Paginate to keep exports bounded and responsive.
           let all=[];let offset=0;const PAGE=1000;
           while(true){
             const r=await dbGet(t,`select=*&order=id.asc&offset=${offset}&limit=${PAGE}`);
@@ -6870,7 +6707,8 @@ function BackupPanel(){
         const rows=backup.tables[t];
         for(let i=0;i<rows.length;i+=200){
           const batch=rows.slice(i,i+200);
-          await fetch(`${SB}/rest/v1/${t}`,{method:"POST",headers:{...H,Prefer:"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(batch)});
+          const r=await fetch(`${API}/admin/restore`,{method:"POST",headers:{"Content-Type":"application/json"},credentials:"include",body:JSON.stringify({table:t,rows:batch})});
+          if(!r.ok)throw new Error((await r.json()).error||`Erreur ${r.status}`);
         }
       }
       setStatus(`✓ Restauration terminée — ${backup._meta.date}`);
@@ -6916,47 +6754,9 @@ function BackupPanel(){
 
     <Card>
       <h3 style={S.sec}><I.Set/> Backup automatique</h3>
-      <p style={{fontSize:12,color:"#666",margin:"0 0 8px",lineHeight:1.5}}>Pour un backup automatique quotidien, configure le GitHub Actions workflow fourni. Il exporte toutes les tables + le code source et commit dans un repo privé.</p>
-      <div style={{background:"#F7F7F8",borderRadius:10,padding:"10px 12px",fontSize:11,fontFamily:"monospace",color:"#555",lineHeight:1.6,overflowX:"auto",whiteSpace:"pre"}}>
-{`# .github/workflows/backup.yml
-name: DRIVE Backup
-on:
-  schedule:
-    - cron: '0 2 * * *'  # 2h du matin
-  workflow_dispatch:       # + bouton manuel
-jobs:
-  backup:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Backup app source
-        run: |
-          mkdir -p backups/app-source
-          cp *.jsx *.html *.css *.json \\
-            backups/app-source/ 2>/dev/null || true
-      - name: Export tables
-        env:
-          SB_URL: \${{ secrets.SUPABASE_URL }}
-          SB_KEY: \${{ secrets.SUPABASE_KEY }}
-        run: |
-          mkdir -p backups/db
-          for T in sites technicians notes \\
-            photos activity_log visits login_logs
-          do
-            curl -s "\$SB_URL/rest/v1/\$T?select=*" \\
-              -H "apikey: \$SB_KEY" \\
-              -H "Authorization: Bearer \$SB_KEY" \\
-              > "backups/db/\$T.json"
-          done
-      - name: Commit backup
-        run: |
-          git config user.name "backup-bot"
-          git config user.email "bot@drive.app"
-          git add backups/
-          git commit -m "backup \$(date +%F)" || true
-          git push`}
-      </div>
-      <p style={{fontSize:10,color:"#BBB",margin:"8px 0 0",lineHeight:1.4}}>Ajoute SUPABASE_URL et SUPABASE_KEY dans les secrets du repo GitHub. Le workflow tourne chaque nuit à 2h et peut être déclenché manuellement.</p>
+      <p style={{fontSize:12,color:"#666",margin:"0 0 8px",lineHeight:1.5}}>PostgreSQL est sauvegardé automatiquement chaque jour sur le VPS. Les archives sont privées, compressées et conservées pendant 30 jours.</p>
+      <div style={{background:"#F7F7F8",borderRadius:10,padding:"10px 12px",fontSize:11,fontFamily:"monospace",color:"#555",lineHeight:1.6,whiteSpace:"pre"}}>{`/opt/drive/data/backups/\n├── drive-AAAA-MM-JJTHH-MM-SSZ.dump\n└── drive-uploads-AAAA-MM-JJTHH-MM-SSZ.tar.gz\n\nFormats : pg_dump + archive médias\nRétention : 30 jours`}</div>
+      <p style={{fontSize:10,color:"#BBB",margin:"8px 0 0",lineHeight:1.4}}>Une copie externe chiffrée pourra être ajoutée ensuite pour couvrir une panne complète du VPS.</p>
     </Card>
   </>;
 }
@@ -6967,15 +6767,17 @@ jobs:
 function TechsAdmin({techs,reload}){
   const[nc,setNc]=useState("");
   const[nn,setNn]=useState("");
+  const[np,setNp]=useState("");
   const[nr,setNr]=useState("tech");
   const[toast,setToast]=useState(null);
   const[toastKey,setToastKey]=useState(0);
   const flash=m=>{setToastKey(k=>k+1);setToast(m);setTimeout(()=>setToast(null),2500);};
 
-  const add=async()=>{if(!nc.trim())return;try{await dbPost("technicians",{code:nc.trim().toUpperCase(),name:nn.trim(),role:nr});setNc("");setNn("");flash("Ajouté ✓");reload();}catch(e){flash("Erreur (code existant ?)");}};
+  const setPin=async(id,pin)=>{const r=await fetch(`${API}/admin/technicians/${id}/pin`,{method:"POST",headers:{"Content-Type":"application/json"},credentials:"include",body:JSON.stringify({pin})});if(!r.ok)throw new Error((await r.json()).error||"Erreur PIN");};
+  const add=async()=>{if(!nc.trim()||np.length!==4)return;try{const created=await dbPost("technicians",{code:nc.trim().toUpperCase(),name:nn.trim(),role:nr});await setPin(created[0].id,np);setNc("");setNn("");setNp("");flash("Profil créé ✓");reload();}catch(e){flash("Erreur (code existant ?)");}};
   const toggle=async(t)=>{try{await dbPatch("technicians",{active:!t.active},`id=eq.${t.id}`);reload();}catch(e){}};
   const del=async(t)=>{if(!await confirmDark(`Supprimer ${t.code} ?`,{danger:true,yesLabel:"Supprimer"}))return;try{await dbDel("technicians",`id=eq.${t.id}`);reload();}catch(e){}};
-  const resetPin=async(t)=>{if(!await confirmDark(`Réinitialiser le PIN de ${t.code} ?`,{hint:"Il devra en créer un nouveau à la prochaine connexion",yesLabel:"Réinitialiser"}))return;try{await dbPatch("technicians",{pin:null},`id=eq.${t.id}`);flash(`PIN de ${t.code} réinitialisé`);reload();}catch(e){flash("Erreur");}};
+  const resetPin=async(t)=>{if(!await confirmDark(`Réinitialiser le PIN de ${t.code} ?`,{hint:"Un nouveau PIN temporaire sera généré",yesLabel:"Réinitialiser"}))return;try{const pin=String(crypto.getRandomValues(new Uint32Array(1))[0]%10000).padStart(4,"0");await setPin(t.id,pin);flash(`Nouveau PIN ${t.code} : ${pin}`);reload();}catch(e){flash("Erreur");}};
 
   return<>
     <Card>
@@ -6984,6 +6786,7 @@ function TechsAdmin({techs,reload}){
         <input type="text" placeholder="CODE" value={nc} onChange={e=>setNc(e.target.value.toUpperCase())} style={{...S.fi,flex:1}} maxLength={20}/>
         <input type="text" placeholder="Nom" value={nn} onChange={e=>setNn(e.target.value)} style={{...S.fi,flex:1}}/>
       </div>
+      <input type="password" inputMode="numeric" placeholder="PIN initial (4 chiffres)" value={np} onChange={e=>setNp(e.target.value.replace(/\D/g,"").slice(0,4))} style={{...S.fi,marginBottom:8}} maxLength={4}/>
       <div style={{display:"flex",gap:8,marginBottom:8}}>
         {["tech","admin"].map(r=><button key={r} onClick={()=>setNr(r)} style={{...S.chip,...(nr===r?S.chipA:{}),flex:1,textAlign:"center"}}>{r==="admin"?"Admin":"Technicien"}</button>)}
       </div>
@@ -7000,7 +6803,7 @@ function TechsAdmin({techs,reload}){
           <span style={{fontSize:9,color:t.role==="admin"?"#FF7900":"#999",marginLeft:6,fontWeight:700}}>{t.role}</span>
         </div>
         <span style={{fontSize:9,color:"#BBB"}}>{t.last_login?new Date(t.last_login).toLocaleDateString("fr"):""}</span>
-        {t.pin&&<button onClick={()=>resetPin(t)} style={{background:"none",border:"none",fontSize:9,color:"#999",cursor:"pointer",fontWeight:600}} title="Reset PIN">PIN ↺</button>}
+        {t.has_pin&&<button onClick={()=>resetPin(t)} style={{background:"none",border:"none",fontSize:9,color:"#999",cursor:"pointer",fontWeight:600}} title="Reset PIN">PIN ↺</button>}
         <button onClick={()=>toggle(t)} style={{background:"none",border:"none",fontSize:10,color:t.active===false?P:"#FFAA00",cursor:"pointer",fontWeight:700}}>{t.active===false?"Activer":"Désact."}</button>
         <button onClick={()=>del(t)} style={{background:"none",border:"none",color:"#E74C3C",cursor:"pointer",padding:2}}><I.Trash/></button>
       </div>)}
@@ -7144,17 +6947,8 @@ function InteractiveMap({lat,lng,onLatLngChange,onAddressChange,myPos,height=300
   // Init map
   useEffect(()=>{
     if(mapInst.current)return;
-    if(!document.getElementById("leaflet-css")){
-      const link=document.createElement("link");link.id="leaflet-css";link.rel="stylesheet";
-      link.href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css";
-      document.head.appendChild(link);
-    }
     const loadLeaflet=()=>{
-      if(window.L)return initMap();
-      const s=document.createElement("script");
-      s.src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js";
-      s.onload=()=>initMap();
-      document.head.appendChild(s);
+      ensureLeaflet().then(()=>initMap()).catch(error=>console.error("Leaflet indisponible",error));
     };
     const initMap=()=>{
       if(!mapRef.current||mapInst.current)return;
@@ -7533,17 +7327,7 @@ function MapView({sites,onSelect,myPos,th,fuelPref}){
   useEffect(()=>{
     if(initDone.current)return;
     const loadL=()=>{
-      if(!window.L){
-        if(!document.getElementById("leaflet-css")){const l=document.createElement("link");l.id="leaflet-css";l.rel="stylesheet";l.href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css";document.head.appendChild(l);}
-        const s=document.createElement("script");s.src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js";s.onload=()=>loadCluster();document.head.appendChild(s);
-      }else loadCluster();
-    };
-    const loadCluster=()=>{
-      if(!document.getElementById("mc-css")){const l=document.createElement("link");l.id="mc-css";l.rel="stylesheet";l.href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.css";document.head.appendChild(l);}
-      if(!document.getElementById("mc-css2")){const l=document.createElement("link");l.id="mc-css2";l.rel="stylesheet";l.href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.Default.css";document.head.appendChild(l);}
-      if(!window.L.MarkerClusterGroup){
-        const s=document.createElement("script");s.src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.min.js";s.onload=init;document.head.appendChild(s);
-      }else init();
+      ensureLeaflet(true).then(()=>init()).catch(error=>console.error("Leaflet indisponible",error));
     };
     const init=()=>{
       if(!mapRef.current||mapInst.current)return;
@@ -7861,12 +7645,7 @@ function AnfrSectors({data,siteLat,siteLng}){
       drawLayers();
       map.on("zoomend",()=>drawLayers());
     };
-    if(window.L)doInit();
-    else{
-      if(!document.getElementById("leaflet-css")){const l=document.createElement("link");l.id="leaflet-css";l.rel="stylesheet";l.href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css";document.head.appendChild(l);}
-      if(!document.getElementById("leaflet-js")){const s=document.createElement("script");s.id="leaflet-js";s.src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js";s.onload=doInit;document.head.appendChild(s);}
-      else doInit();
-    }
+    ensureLeaflet().then(()=>doInit()).catch(error=>console.error("Leaflet indisponible",error));
     return()=>{if(mapInst.current){mapInst.current.remove();mapInst.current=null;initDone.current=false;}};
   },[siteLat,siteLng]);
 
@@ -7947,7 +7726,7 @@ function StationDetail({station,fuelPref,th,geo,onClose,onRefresh}){
     setRefreshing(true);
     try{
       const dep=s.address?.match(/\b(67|68)\d{3}\b/)?.[0]?.slice(0,2)||"68";
-      const r=await fetch(`${SB}/functions/v1/fuel-prices?deps=${dep}`,{headers:{"apikey":SK,"Authorization":`Bearer ${SK}`}});
+      const r=await fetch(`${FUEL_API_URL}?deps=${dep}`,{credentials:"include"});
       if(!r.ok)throw new Error(`${r.status}`);
       const d=await r.json();
       const stId=String(s.id).replace("st_","");
@@ -8150,7 +7929,7 @@ function OfflinePanel({auth,flash,fetchSites}){
       setStatus(`✓ ${allPhotos.length} photos — Stations...`);
       // 4. Stations
       try{
-        const r=await fetch(`${SB}/functions/v1/fuel-prices?deps=67,68`,{headers:{"apikey":SK,"Authorization":`Bearer ${SK}`}});
+        const r=await fetch(`${FUEL_API_URL}?deps=67,68`,{credentials:"include"});
         if(r.ok){const d=await r.json();if(d.results){await idbSet("cache","stations",d.results);ls.set("drv_stations",JSON.stringify(d.results));ls.set("drv_stations_ts",Date.now().toString());}}
       }catch(e){}
       setStatus(`✓ Sync complète — Envoi des modifs...`);
@@ -8206,7 +7985,7 @@ function Drawer({auth,th,setPage,setFilt,onClose,openSettings,openAbout,logout,f
     const from=new Date(now.getFullYear(),now.getMonth(),1).toISOString();
     // Independent fetches — any failure doesn't block the others
     (async()=>{try{const v=await dbGet("visits",`technician_code=eq.${auth.code}&visited_at=gte.${from}&select=id`);setStats(s=>({...s,visits:v?.length||0}));}catch(e){}})();
-    (async()=>{try{const p=await dbGet("site_photos",`uploader_code=eq.${auth.code}&created_at=gte.${from}&select=id`);setStats(s=>({...s,photos:p?.length||0}));}catch(e){}})();
+    (async()=>{try{const p=await dbGet("photos",`technician_code=eq.${auth.code}&created_at=gte.${from}&select=id`);setStats(s=>({...s,photos:p?.length||0}));}catch(e){}})();
     (async()=>{try{const a=await dbGet("activity_log",`technician_code=eq.${auth.code}&created_at=gte.${from}&action=eq.edit&select=details`);const gpsUpdates=(a||[]).filter(x=>{try{const d=JSON.parse(x.details);return d.lat!==undefined||d.lng!==undefined;}catch{return false;}}).length;setStats(s=>({...s,gps:gpsUpdates}));}catch(e){}})();
   },[auth?.code]);
 
@@ -8466,7 +8245,7 @@ function AboutModal({onClose}){
       <p style={{fontSize:11,color:"#BBB",margin:"0 0 20px"}}>Build {APP_BUILD}</p>
       <div style={{background:"#F7F7F8",borderRadius:12,padding:"14px 16px",textAlign:"left",marginBottom:16}}>
         <p style={{fontSize:12,color:"#666",margin:"0 0 8px",lineHeight:1.5}}>Application de gestion des sites techniques pour les équipes terrain. Consultez, modifiez et géolocalisez vos sites directement depuis le mobile.</p>
-        <p style={{fontSize:12,color:"#666",margin:0,lineHeight:1.5}}>Données stockées sur Supabase. Photos compressées automatiquement. Fonctionne hors-ligne.</p>
+        <p style={{fontSize:12,color:"#666",margin:0,lineHeight:1.5}}>Données et photos hébergées sur le VPS DRIVE. Photos compressées automatiquement. Fonctionne hors-ligne.</p>
       </div>
       <div style={{borderTop:"1px solid #F0F0F0",paddingTop:14}}>
         <p style={{fontSize:11,color:"#BBB",margin:"0 0 4px"}}>Développé pour les équipes Orange</p>
